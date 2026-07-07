@@ -37,12 +37,13 @@ from core.auth_client import authenticate, AuthError
 from core.trading_calendar import compute_trading_date_range, TradingCalendarError
 from core.bhavcopy_downloader import (
     download_bhavcopy,
+    is_nse_legacy_format,
     BhavCopyNotFoundError,
     BhavCopyDownloadError,
 )
 from core.db_client import get_connection, test_connection, DbConnectionError
 from core.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
-from core.bhavcopy_persistence import persist_nse, persist_bse, BhavCopyPersistenceError
+from core.bhavcopy_persistence import persist_nse, persist_bse, is_already_persisted, BhavCopyPersistenceError
 
 DATE_INPUT_FORMAT = "%d%m%Y"  # DDMMYYYY
 RATE_LIMIT_SECONDS = 1.5  # sleep between download requests
@@ -177,6 +178,9 @@ def step_2(env_values, trading_date_list):
     download_dir = env_values["MARKET_DATA_LOADER_DOWNLOAD_DIR"]
     total = len(trading_date_list)
     date_bc_map = {}
+    skipped_count = 0
+    downloaded_count = 0
+    legacy_format_count = 0
 
     for idx, trade_date in enumerate(trading_date_list, start=1):
         date_display = trade_date.strftime("%d-%b-%Y")
@@ -184,28 +188,51 @@ def step_2(env_values, trading_date_list):
 
         nse_path = None
         bse_path = None
+        nse_skipped = False
+        bse_skipped = False
 
         # -- NSE --
         try:
-            nse_path = download_bhavcopy("NSE", trade_date, download_dir)
-            print(f"  [OK] NSE downloaded -> {nse_path}")
+            downloaded_path, nse_skipped, _nse_is_legacy = download_bhavcopy("NSE", trade_date, download_dir)
+            nse_is_legacy = is_nse_legacy_format(trade_date)  # reliable regardless of skip status
+            if nse_skipped:
+                print(f"  [SKIP] NSE already exists -> {downloaded_path}")
+                skipped_count += 1
+            elif nse_is_legacy:
+                print(f"  [OK] NSE downloaded (legacy format) -> {downloaded_path}")
+                downloaded_count += 1
+                legacy_format_count += 1
+            else:
+                print(f"  [OK] NSE downloaded -> {downloaded_path}")
+                downloaded_count += 1
+            nse_path = downloaded_path
         except BhavCopyNotFoundError as e:
             print(f"  [SKIP] NSE not available: {e}")
         except BhavCopyDownloadError as e:
             print(f"  [FAILED] NSE download error: {e}")
 
-        time.sleep(RATE_LIMIT_SECONDS)
+        # Only rate-limit when an actual network request was made -- no
+        # need to pause after a same-file skip, since nothing was sent.
+        if not nse_skipped:
+            time.sleep(RATE_LIMIT_SECONDS)
 
         # -- BSE --
         try:
-            bse_path = download_bhavcopy("BSE", trade_date, download_dir)
-            print(f"  [OK] BSE downloaded -> {bse_path}")
+            downloaded_path, bse_skipped, _bse_is_legacy = download_bhavcopy("BSE", trade_date, download_dir)
+            if bse_skipped:
+                print(f"  [SKIP] BSE already exists -> {downloaded_path}")
+                skipped_count += 1
+            else:
+                print(f"  [OK] BSE downloaded -> {downloaded_path}")
+                downloaded_count += 1
+            bse_path = downloaded_path
         except BhavCopyNotFoundError as e:
             print(f"  [SKIP] BSE not available: {e}")
         except BhavCopyDownloadError as e:
             print(f"  [FAILED] BSE download error: {e}")
 
-        time.sleep(RATE_LIMIT_SECONDS)
+        if not bse_skipped:
+            time.sleep(RATE_LIMIT_SECONDS)
 
         date_bc_map[trade_date] = [nse_path, bse_path]
 
@@ -221,6 +248,10 @@ def step_2(env_values, trading_date_list):
     print(f"  NSE only:                  {nse_only_count}")
     print(f"  BSE only:                  {bse_only_count}")
     print(f"  Neither downloaded:        {neither_count}")
+    print(f"  Newly downloaded (files):  {downloaded_count}")
+    print(f"  Skipped (already on disk): {skipped_count}")
+    if legacy_format_count:
+        print(f"  NSE legacy-format files:   {legacy_format_count}")
 
     return {
         "date_bc_map": date_bc_map,
@@ -257,41 +288,49 @@ def step_3(env_values, trading_date_list, date_bc_map):
 
             # -- NSE: parse then persist --
             if nse_path:
-                start_time_ms = time.time() * 1000
-                try:
-                    rows = parse_bhavcopy_csv(nse_path, trade_date)
-                    persist_nse(conn, rows, trade_date, nse_path, start_time_ms)
-                    print(f"  [OK] NSE persisted -- {len(rows)} rows")
+                if is_already_persisted(conn, trade_date, "NSE"):
+                    print("  [SKIP] NSE already persisted for this date (re-run safe)")
                     nse_ok = True
-                    total_nse_rows += len(rows)
-                except BhavCopyParseError as e:
-                    print(f"  [FAILED] NSE parse error: {e}")
-                    nse_ok = False
-                    errors.append({"date": trade_date, "exchange": "NSE", "error": str(e)})
-                except BhavCopyPersistenceError as e:
-                    print(f"  [FAILED] NSE persistence error: {e}")
-                    nse_ok = False
-                    errors.append({"date": trade_date, "exchange": "NSE", "error": str(e)})
+                else:
+                    start_time_ms = time.time() * 1000
+                    try:
+                        rows = parse_bhavcopy_csv(nse_path, trade_date)
+                        persist_nse(conn, rows, trade_date, nse_path, start_time_ms)
+                        print(f"  [OK] NSE persisted -- {len(rows)} rows")
+                        nse_ok = True
+                        total_nse_rows += len(rows)
+                    except BhavCopyParseError as e:
+                        print(f"  [FAILED] NSE parse error: {e}")
+                        nse_ok = False
+                        errors.append({"date": trade_date, "exchange": "NSE", "error": str(e)})
+                    except BhavCopyPersistenceError as e:
+                        print(f"  [FAILED] NSE persistence error: {e}")
+                        nse_ok = False
+                        errors.append({"date": trade_date, "exchange": "NSE", "error": str(e)})
             else:
                 print("  [SKIP] NSE -- no file downloaded for this date")
 
             # -- BSE: parse then persist -- independent of NSE outcome --
             if bse_path:
-                start_time_ms = time.time() * 1000
-                try:
-                    rows = parse_bhavcopy_csv(bse_path, trade_date)
-                    persist_bse(conn, rows, trade_date, bse_path, start_time_ms)
-                    print(f"  [OK] BSE persisted -- {len(rows)} rows")
+                if is_already_persisted(conn, trade_date, "BSE"):
+                    print("  [SKIP] BSE already persisted for this date (re-run safe)")
                     bse_ok = True
-                    total_bse_rows += len(rows)
-                except BhavCopyParseError as e:
-                    print(f"  [FAILED] BSE parse error: {e}")
-                    bse_ok = False
-                    errors.append({"date": trade_date, "exchange": "BSE", "error": str(e)})
-                except BhavCopyPersistenceError as e:
-                    print(f"  [FAILED] BSE persistence error: {e}")
-                    bse_ok = False
-                    errors.append({"date": trade_date, "exchange": "BSE", "error": str(e)})
+                else:
+                    start_time_ms = time.time() * 1000
+                    try:
+                        rows = parse_bhavcopy_csv(bse_path, trade_date)
+                        persist_bse(conn, rows, trade_date, bse_path, start_time_ms)
+                        print(f"  [OK] BSE persisted -- {len(rows)} rows")
+                        bse_ok = True
+                        total_bse_rows += len(rows)
+                    except BhavCopyParseError as e:
+                        print(f"  [FAILED] BSE parse error: {e}")
+                        bse_ok = False
+                        errors.append({"date": trade_date, "exchange": "BSE", "error": str(e)})
+                    except BhavCopyPersistenceError as e:
+                        print(f"  [FAILED] BSE persistence error: {e}")
+                        bse_ok = False
+                        errors.append({"date": trade_date, "exchange": "BSE", "error": str(e)})
             else:
                 print("  [SKIP] BSE -- no file downloaded for this date")
 

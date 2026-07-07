@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # -- Registered loaders -- (display_name, module_path_under_loaders) --------
 LOADERS = [
     ("bhavcopy_loader", "loaders.bhavcopy_loader"),
+    ("bhavcopy_downloader_loader", "loaders.bhavcopy_downloader_loader"),
 ]
 
 

@@ -41,6 +41,25 @@ class BhavCopyPersistenceError(Exception):
     pass
 
 
+def is_already_persisted(conn, trade_date, exchange_code):
+    """
+    Checks bhav_copy_metadata for an existing SUCCESS row for this
+    (trade_date, exchange). Used by the loader to make re-running a range
+    idempotent -- persist_nse() always does a fresh batch insert with no
+    duplicate check (matching BhavCopyPersistenceServiceHandler.java,
+    where this only ever runs once per date via a manual UI click), so
+    callers MUST skip already-persisted dates themselves before calling
+    persist_nse()/persist_bse() again, or re-running a range will insert
+    duplicate rows for every date that already succeeded.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM bhav_copy_metadata WHERE trade_date = %s AND exchange = %s AND upload_status = 'SUCCESS'",
+            (trade_date, exchange_code),
+        )
+        return cur.fetchone() is not None
+
+
 INSERT_COLUMNS = [
     "symbol", "exchange", "series", "open", "high", "low", "close", "last",
     "prev_close", "tot_trd_qty", "tot_trd_val", "trade_date", "total_trades",
