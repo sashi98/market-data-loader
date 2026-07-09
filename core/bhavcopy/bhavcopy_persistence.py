@@ -1,4 +1,4 @@
-# core/bhavcopy_persistence.py
+# core/bhavcopy/bhavcopy_persistence.py
 #
 # Mirrors BhavCopyPersistenceServiceHandler.java exactly:
 #
@@ -39,6 +39,51 @@ from psycopg2.extras import execute_values
 class BhavCopyPersistenceError(Exception):
     """Raised when NSE/BSE persistence fails. Caller should roll back the transaction."""
     pass
+
+
+# Hardcoded series-equivalence groups for the BSE merge decision -- mirrors
+# BhavCopyPersistenceServiceHandler.java's SERIES_MERGE_GROUPS exactly.
+# NOT read from security_series (that table exists but is not currently
+# read anywhere in this codebase; not worth wiring up a new read path
+# just for this bug fix).
+#
+# WHY this is needed at all: NSE and BSE use DIFFERENT series codes for
+# the SAME real-world listing -- NSE calls plain equity "EQ", BSE calls
+# the identical listing "B". Without this map, the merge lookup
+# (isin+trade_date+series+symbol, exact match) can never find NSE's "EQ"
+# row when checking BSE's "B" row for the same stock, so BSE's row gets
+# inserted as a SECOND row instead of merging into the first -- confirmed
+# real for thousands of dual-listed stocks (e.g. isin IN9175A01010,
+# symbol JISLDVREQS) across the 2024-2026 backfill.
+#
+# Every series NOT listed here defaults to matching only itself (see
+# _resolve_merge_group) -- this preserves the earlier fix where a
+# bulk-deal (BL) row must NOT merge into an EQ row, and where BSE's two
+# simultaneous "A"-series preference-share listings ("SBIN"/"SBIN#") must
+# NOT merge into each other either (symbol still has to match exactly
+# regardless of this map).
+SERIES_MERGE_GROUPS = {
+    "EQ": "EQUITY_GROUP",
+    "B": "EQUITY_GROUP",
+}
+
+# Labels that represent a REAL multi-code group (2+ distinct series codes
+# mapped to the same label) -- used to gate the symbol-agnostic tier-2
+# fallback below. A series NOT in SERIES_MERGE_GROUPS resolves to itself
+# via _resolve_merge_group(), which can never collide with one of these
+# labels (none of them are real series codes), so this check safely tells
+# apart "a real cross-exchange group" from "just matching itself".
+MULTI_CODE_GROUP_LABELS = set(SERIES_MERGE_GROUPS.values())
+
+
+def _resolve_merge_group(series):
+    """
+    Resolves a series code to its merge-group identifier for the BSE
+    merge decision. Defaults to the series itself for anything not in
+    SERIES_MERGE_GROUPS -- i.e. matches only an EXACT same series unless
+    explicitly grouped otherwise.
+    """
+    return SERIES_MERGE_GROUPS.get(series, series)
 
 
 def is_already_persisted(conn, trade_date, exchange_code):
@@ -151,13 +196,41 @@ def persist_bse(conn, parsed_rows, trade_date, csv_file_path, start_time_ms):
     writes bhav_copy_metadata (exchange='BSE') on success.
 
     Batched (not row-by-row like the Java forEach it mirrors, for
-    performance over many dates), but functionally identical:
+    performance over many dates), but functionally identical -- a
+    TWO-TIER lookup per row, matching
+    BhavCopyPersistenceServiceHandler.java exactly:
+
+      Tier 1 (exact): (isin, series, symbol) exact match. Protects
+        idempotent re-runs and BSE's own "SBIN"/"SBIN#" simultaneous
+        preference-share listings (confirmed real, INE062A01020 on
+        28-Mar-2024, materially different trade counts -- must NOT merge
+        into each other).
+
+      Tier 2 (cross-exchange fallback, ONLY when tier 1 finds nothing AND
+        the row's resolved merge group is a REAL multi-code group --
+        currently just EQ<->B): (isin, merge_group) match, symbol
+        IGNORED. Catches NSE and BSE spelling the SAME company's ticker
+        differently -- confirmed real (isin INE020801028: NSE
+        "SPENCERS", BSE "SPENCER"; INE0CG601016: NSE "MAXIND", BSE
+        "MAXINDIA"). Since NSE always runs first, this only ever finds
+        NSE's existing row -- its symbol is deliberately left untouched
+        (NSE's spelling stays canonical), only `exchange` gets appended.
+
+      Gating tier 2 to ONLY multi-code groups (via MULTI_CODE_GROUP_LABELS)
+        is what keeps this from reopening the SBIN/SBIN# bug -- a
+        singleton group (e.g. series=A, series=BL) must NEVER use the
+        symbol-agnostic fallback.
+
+    Steps:
       1. One SELECT -- fetch all existing bhav_copy rows for trade_date,
-         keyed by isin (first-seen id wins if duplicates exist, matching
-         the ORDER BY id ASC LIMIT 1 behavior a row-by-row lookup would give).
-      2. Partition parsed_rows into to_insert (isin not found) and
-         to_update (isin found, existing exchange doesn't already contain
-         the new value).
+         build BOTH an exact-match dict (isin, series, symbol) and a
+         group dict (isin, merge_group) -- the latter only populated from
+         rows whose OWN series resolves to a multi-code group label
+         (first-seen id wins per key if duplicates exist, matching the
+         ORDER BY id ASC LIMIT 1 behavior a row-by-row lookup would give).
+      2. Partition parsed_rows into to_insert (neither tier matched) and
+         to_update (a tier matched, existing exchange doesn't already
+         contain the new value).
       3. One batch INSERT for to_insert.
       4. One batch UPDATE (via UPDATE ... FROM (VALUES ...)) for to_update.
 
@@ -167,22 +240,37 @@ def persist_bse(conn, parsed_rows, trade_date, csv_file_path, start_time_ms):
     """
     try:
         with conn.cursor() as cur:
-            # -- 1. Fetch existing rows for this trade_date, keyed by isin --
+            # -- 1. Fetch existing rows for this trade_date, build both lookup dicts --
             cur.execute(
-                "SELECT id, isin, exchange FROM bhav_copy WHERE trade_date = %s ORDER BY id ASC",
+                "SELECT id, isin, series, symbol, exchange FROM bhav_copy WHERE trade_date = %s ORDER BY id ASC",
                 (trade_date,),
             )
-            existing_by_isin = {}
-            for row_id, isin, exchange in cur.fetchall():
-                if isin not in existing_by_isin:
-                    existing_by_isin[isin] = (row_id, exchange)
+            existing_by_exact_key = {}
+            existing_by_group_key = {}
+            for row_id, isin, series, symbol, exchange in cur.fetchall():
+                exact_key = (isin, series, symbol)
+                if exact_key not in existing_by_exact_key:
+                    existing_by_exact_key[exact_key] = (row_id, exchange)
 
-            # -- 2. Partition --
+                group = _resolve_merge_group(series)
+                if group in MULTI_CODE_GROUP_LABELS:
+                    group_key = (isin, group)
+                    if group_key not in existing_by_group_key:
+                        existing_by_group_key[group_key] = (row_id, exchange)
+
+            # -- 2. Partition, using the two-tier lookup --
             to_insert = []
             to_update = []  # (id, new_exchange_value)
 
             for row in parsed_rows:
-                existing = existing_by_isin.get(row["isin"])
+                exact_key = (row["isin"], row["series"], row["symbol"])
+                existing = existing_by_exact_key.get(exact_key)
+
+                if existing is None:
+                    group = _resolve_merge_group(row["series"])
+                    if group in MULTI_CODE_GROUP_LABELS:
+                        existing = existing_by_group_key.get((row["isin"], group))
+
                 if existing is None:
                     to_insert.append(row)
                 else:

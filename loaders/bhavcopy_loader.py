@@ -6,8 +6,10 @@
 #   Step 0: Load + validate config/.env, pre-flight health check,
 #           admin authentication (JWT for /api/holidays/sync/{year}),
 #           direct DB connectivity check
-#   Step 1: Prompt for to_date + number of trading days, derive from_date
-#           and the full trading_date_list (weekends + holidays excluded)
+#   Step 1: Prompt for to_date (defaults to today/yesterday per the 8pm
+#           BhavCopy-availability cutoff) and from_date (always typed),
+#           derive the actual trading_date_list between them (weekends +
+#           holidays excluded)
 #   Step 2: Download NSE (zip) + BSE (direct CSV) BhavCopy files for each
 #           trading date into MARKET_DATA_LOADER_DOWNLOAD_DIR
 #   Step 3: Parse + persist NSE then BSE per date -- NSE fresh insert,
@@ -34,16 +36,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.env_validator import load_and_validate_env, EnvValidationError
 from core.health_client import check_health, HealthCheckError
 from core.auth_client import authenticate, AuthError
-from core.trading_calendar import compute_trading_date_range, TradingCalendarError
-from core.bhavcopy_downloader import (
+from core.trading_calendar import (
+    compute_trading_date_range_between,
+    compute_default_to_date,
+    TradingCalendarError,
+)
+from core.bhavcopy.bhavcopy_downloader import (
     download_bhavcopy,
     is_nse_legacy_format,
     BhavCopyNotFoundError,
     BhavCopyDownloadError,
 )
 from core.db_client import get_connection, test_connection, DbConnectionError
-from core.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
-from core.bhavcopy_persistence import persist_nse, persist_bse, is_already_persisted, BhavCopyPersistenceError
+from core.bhavcopy.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
+from core.bhavcopy.bhavcopy_persistence import persist_nse, persist_bse, is_already_persisted, BhavCopyPersistenceError
+from core.logging_setup import start_run_logging
 
 DATE_INPUT_FORMAT = "%d%m%Y"  # DDMMYYYY
 RATE_LIMIT_SECONDS = 1.5  # sleep between download requests
@@ -108,50 +115,56 @@ def step_1(env_values, jwt_token):
 
     tmt_app_base_url = env_values["TMT_APP_BASE_URL"]
 
-    # -- 1.1: Prompt for to_date --
-    to_date_str = input("Input to_date(DDMMYYYY): ").strip()
+    # -- 1.1: Prompt for to_date (pre-filled default -- Enter accepts it, or type any other date) --
+    default_to_date = compute_default_to_date()
+    default_to_date_str = default_to_date.strftime(DATE_INPUT_FORMAT)
+    to_date_str = input(f"Input to_date(DDMMYYYY) [default: {default_to_date_str}]: ").strip()
+    if not to_date_str:
+        to_date_str = default_to_date_str
     try:
         to_date = datetime.strptime(to_date_str, DATE_INPUT_FORMAT).date()
     except ValueError:
         print(f"  [FAILED] Invalid date '{to_date_str}' -- expected DDMMYYYY (e.g. 05072026).")
         sys.exit(1)
 
-    # -- 1.2: Prompt for number of trading days --
-    num_days_str = input("Input Number of trading days: ").strip()
+    # -- 1.2: Prompt for from_date (no default -- always typed) --
+    from_date_str_input = input("Input from_date(DDMMYYYY): ").strip()
     try:
-        num_days = int(num_days_str)
-        if num_days <= 0:
-            raise ValueError
+        from_date = datetime.strptime(from_date_str_input, DATE_INPUT_FORMAT).date()
     except ValueError:
-        print(f"  [FAILED] Invalid number of trading days '{num_days_str}' -- must be a positive integer.")
+        print(f"  [FAILED] Invalid date '{from_date_str_input}' -- expected DDMMYYYY (e.g. 01012024).")
         sys.exit(1)
 
-    # -- 1.3: Derive from_date + trading_date_list --
+    if from_date > to_date:
+        print(f"  [FAILED] from_date ({from_date_str_input}) cannot be after to_date ({to_date_str}).")
+        sys.exit(1)
+
+    # -- 1.3: Derive the actual trading_date_list between from_date and to_date --
     try:
-        result = compute_trading_date_range(
-            to_date, num_days, tmt_app_base_url, jwt_token
+        result = compute_trading_date_range_between(
+            from_date, to_date, tmt_app_base_url, jwt_token
         )
     except TradingCalendarError as e:
         print(f"  [FAILED] {e}")
         sys.exit(1)
 
-    from_date = result["from_date"]
     trading_date_list = result["trading_date_list"]
     weekend_count = result["weekend_count"]
     holiday_count = result["holiday_count"]
+    num_days = len(trading_date_list)
 
-    from_date_str = from_date.strftime(DATE_INPUT_FORMAT)
+    from_date_confirm_str = from_date.strftime(DATE_INPUT_FORMAT)
     to_date_confirm_str = to_date.strftime(DATE_INPUT_FORMAT)
 
     total_calendar_days = num_days + weekend_count + holiday_count
 
-    print(f"\nFrom date is {from_date_str} which includes {num_days} trading days , "
-          f"weekends(Saturday,Sundays) + Holidays")
+    print(f"\nRange {from_date_confirm_str} to {to_date_confirm_str} contains {num_days} trading days, "
+          f"after excluding weekends(Saturday,Sundays) + Holidays")
     print(f"  Weekends excluded: {weekend_count}")
     print(f"  Holidays excluded: {holiday_count}")
     print(f"  Total calendar days: {total_calendar_days} "
           f"({num_days} trading + {weekend_count} weekends + {holiday_count} holidays)")
-    print(f"BhavCopy will be fetched from {from_date_str} to {to_date_confirm_str}")
+    print(f"BhavCopy will be fetched from {from_date_confirm_str} to {to_date_confirm_str}")
 
     confirm = input("Continue Y/N: ").strip().upper()
     if confirm != "Y":
@@ -412,17 +425,18 @@ def step_4(step_1_context, step_3_context, elapsed_seconds):
 
 def run():
     """Standard entry point called by main.py (or directly, standalone)."""
-    run_start_time = time.time()
-    step_0_context = step_0()
-    step_1_context = step_1(step_0_context["env_values"], step_0_context["jwt_token"])
-    step_2_context = step_2(step_0_context["env_values"], step_1_context["trading_date_list"])
-    step_3_context = step_3(
-        step_0_context["env_values"],
-        step_1_context["trading_date_list"],
-        step_2_context["date_bc_map"],
-    )
-    elapsed_seconds = time.time() - run_start_time
-    step_4(step_1_context, step_3_context, elapsed_seconds)
+    with start_run_logging("bhavcopy_loader"):
+        run_start_time = time.time()
+        step_0_context = step_0()
+        step_1_context = step_1(step_0_context["env_values"], step_0_context["jwt_token"])
+        step_2_context = step_2(step_0_context["env_values"], step_1_context["trading_date_list"])
+        step_3_context = step_3(
+            step_0_context["env_values"],
+            step_1_context["trading_date_list"],
+            step_2_context["date_bc_map"],
+        )
+        elapsed_seconds = time.time() - run_start_time
+        step_4(step_1_context, step_3_context, elapsed_seconds)
 
 
 if __name__ == "__main__":

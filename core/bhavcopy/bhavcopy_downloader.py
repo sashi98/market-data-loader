@@ -1,4 +1,4 @@
-# core/bhavcopy_downloader.py
+# core/bhavcopy/bhavcopy_downloader.py
 #
 # Downloads NSE + BSE BhavCopy files for a single trade date. Mirrors
 # BhavCopyDownloadServiceHandler.java exactly for the CURRENT (UDiFF)

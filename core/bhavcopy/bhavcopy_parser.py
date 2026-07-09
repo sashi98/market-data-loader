@@ -1,4 +1,4 @@
-# core/bhavcopy_parser.py
+# core/bhavcopy/bhavcopy_parser.py
 #
 # Parses a single BhavCopy CSV file into a list of row dicts matching the
 # `bhav_copy` table's columns. Supports THREE header formats, auto-
@@ -39,9 +39,16 @@
 #
 # Otherwise mirrors BhavCopyCSVParser.java + BaseCSVParser.java exactly:
 #   - Comma-delimited, fields trimmed, header names matched case-insensitively
-#   - Duplicate (isin, symbol) rows within the same file -- first occurrence
-#     wins, later duplicates silently dropped (LinkedHashMap put-if-absent
-#     semantics in the Java parser)
+#   - Duplicate (isin, symbol, series) rows within the same file -- first
+#     occurrence wins, later duplicates silently dropped (LinkedHashMap
+#     put-if-absent semantics in the Java parser). IMPORTANT: the key
+#     includes series, not just isin+symbol -- NSE/BSE genuinely publish
+#     multiple rows for the same isin+symbol on the same date when a
+#     bulk/block deal (series=BL) exists alongside the regular equity
+#     session (series=EQ). An isin+symbol-only key would silently drop
+#     one of them as a "duplicate" -- confirmed this actually happened
+#     for ADANIENT (isin INE423A01024) on 14-May-2026 and 05-Jun-2026,
+#     corrupting rsi14d_workbook's RSI14 downstream of those dates.
 #   - Numeric fields (open/high/low/close/last/prevClose) -- parsed to
 #     2 decimal places, HALF_UP rounding; null (None) if blank/unparseable
 #   - totTrdQty / totalTrades -- parsed as integers; None if blank/unparseable
@@ -329,8 +336,8 @@ def parse_bhavcopy_csv(file_path, expected_trade_date):
     expected_trade_date:  python date object -- must match every parsed
                            row's trade date, or BhavCopyParseError is raised
 
-    Returns a list of row dicts (deduped by isin+symbol, first occurrence
-    wins), each with keys:
+    Returns a list of row dicts (deduped by isin+symbol+series, first
+    occurrence wins), each with keys:
         symbol, exchange, series, open, high, low, close, last, prevClose,
         totTrdQty, totTrdVal, tradeDate, totalTrades, isin, ltpPercentChange
 
@@ -362,11 +369,11 @@ def parse_bhavcopy_csv(file_path, expected_trade_date):
     else:
         parse_row = _parse_row_v1
 
-    deduped = {}  # (isin+symbol) -> row dict, first occurrence wins
+    deduped = {}  # (isin+symbol+series) -> row dict, first occurrence wins
 
     for raw_row in raw_rows:
         row_dict = parse_row(raw_row, header_lookup)
-        key = (row_dict["isin"] or "") + (row_dict["symbol"] or "")
+        key = (row_dict["isin"] or "") + (row_dict["symbol"] or "") + (row_dict["series"] or "")
         if key not in deduped:
             deduped[key] = row_dict
 

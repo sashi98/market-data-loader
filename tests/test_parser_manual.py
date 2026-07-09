@@ -1,6 +1,6 @@
 # tests/test_parser_manual.py
 #
-# Quick manual verification of core/bhavcopy_parser.py against real
+# Quick manual verification of core/bhavcopy/bhavcopy_parser.py against real
 # downloaded files -- not an automated test suite, just a sanity check.
 # Run from repo root:
 #   python tests/test_parser_manual.py
@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
+from core.bhavcopy.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
 
 DOWNLOAD_DIR = Path("D:/MyProjectsWorkSpace/MY_DEV/track-my-trade/data/all")
 

@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 LOADERS = [
     ("bhavcopy_loader", "loaders.bhavcopy_loader"),
     ("bhavcopy_downloader_loader", "loaders.bhavcopy_downloader_loader"),
+    ("rsi14d_loader", "loaders.rsi14d_loader"),
 ]
 
 
