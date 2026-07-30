@@ -12,8 +12,9 @@
 #           holidays excluded)
 #   Step 2: Download NSE (zip) + BSE (direct CSV) BhavCopy files for each
 #           trading date into MARKET_DATA_LOADER_DOWNLOAD_DIR
-#   Step 3: Parse + persist NSE then BSE per date -- NSE fresh insert,
-#           BSE upsert-merge by ISIN, each an independent transaction
+#   Step 3: Parse + persist NSE then BSE per date -- both exchanges do a
+#           plain batch insert, independent transactions, no cross-
+#           exchange lookup or merge of any kind
 #   Step 4: Summary report -- date-range breakdown (fully/partially/fully
 #           failed), total rows persisted per exchange, elapsed time,
 #           and a list of every error encountered with its exact message

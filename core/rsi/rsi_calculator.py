@@ -36,23 +36,10 @@
 
 import pandas as pd
 
-RSI_PERIOD = 14
+from core.rsi.rsi_math import RSI_PERIOD, seed, step, compute_rsi14
 
 
 def compute_rsi14_for_isin(df_isin):
-    """
-    df_isin: DataFrame for a SINGLE isin, columns [isin, symbol, trade_date,
-    close, prev_close], already sorted by trade_date ASCENDING. Index does
-    not matter, will be reset internally.
-
-    Returns a new DataFrame with columns
-    [isin, symbol, trade_date, gain, loss, avg_gain, avg_loss, rsi14] --
-    one row per input row. gain/loss are NaN only where prev_close itself
-    is NaN (typically the isin's very first ever listed day, if that
-    falls inside the fetched window). avg_gain/avg_loss/rsi14 stay NaN
-    until the seed (first `period` consecutive rows with a valid
-    gain/loss), populated from there on.
-    """
     df_isin = df_isin.reset_index(drop=True)
     close = df_isin["close"]
     prev_close = df_isin["prev_close"]
@@ -69,20 +56,29 @@ def compute_rsi14_for_isin(df_isin):
     first_valid_idx = valid_mask.idxmax() if valid_mask.any() else None
 
     if first_valid_idx is not None:
-        seed_pos = first_valid_idx + RSI_PERIOD - 1  # 0-indexed row where the seed lands
+        seed_pos = first_valid_idx + RSI_PERIOD - 1
         if seed_pos < n:
-            avg_gain.iloc[seed_pos] = gain.iloc[first_valid_idx:seed_pos + 1].mean()
-            avg_loss.iloc[seed_pos] = loss.iloc[first_valid_idx:seed_pos + 1].mean()
-
+            avg_gain.iloc[seed_pos], avg_loss.iloc[seed_pos] = seed(
+                list(gain.iloc[first_valid_idx:seed_pos + 1]),
+                list(loss.iloc[first_valid_idx:seed_pos + 1]),
+            )
             for i in range(seed_pos + 1, n):
-                avg_gain.iloc[i] = (avg_gain.iloc[i - 1] * (RSI_PERIOD - 1) + gain.iloc[i]) / RSI_PERIOD
-                avg_loss.iloc[i] = (avg_loss.iloc[i - 1] * (RSI_PERIOD - 1) + loss.iloc[i]) / RSI_PERIOD
+                avg_gain.iloc[i], avg_loss.iloc[i] = step(
+                    avg_gain.iloc[i - 1], avg_loss.iloc[i - 1], gain.iloc[i], loss.iloc[i]
+                )
 
-    rs = avg_gain / avg_loss
-    rsi14 = 100 - (100 / (1 + rs))
+    rsi14 = pd.Series([
+        compute_rsi14(
+            None if pd.isna(ag) else ag,
+            None if pd.isna(al) else al,
+        )
+        for ag, al in zip(avg_gain, avg_loss)
+    ])
 
     return pd.DataFrame({
         "isin": df_isin["isin"],
+        "exchange": df_isin["exchange"],
+        "series": df_isin["series"],
         "symbol": df_isin["symbol"],
         "trade_date": df_isin["trade_date"],
         "gain": gain,
@@ -95,15 +91,24 @@ def compute_rsi14_for_isin(df_isin):
 
 def compute_rsi14_all(df):
     """
-    df: DataFrame across ALL isins, columns [isin, symbol, trade_date,
-    close, prev_close]. Does NOT need to be pre-sorted -- sorting happens
-    per group.
+    df: DataFrame across ALL isins, columns [isin, exchange, series,
+    symbol, trade_date, close, prev_close].
 
-    Returns the concatenated per-isin result of compute_rsi14_for_isin(),
-    one row per (isin, trade_date) in the input.
+    Grouped by (isin, exchange, series, symbol) -- a stock trading under
+    multiple series on the same exchange (e.g. EQ vs BE) is a genuinely
+    distinct price series with its own independent RSI walk, same
+    reasoning as the isin+exchange split. SYMBOL is included too because
+    bhav_copy's symbol can carry a remark-flag suffix (e.g. BSE's
+    trailing '#') on some trade dates but not others for the same
+    isin+exchange+series -- without SYMBOL in the grouping key, those
+    rows would collide on (isin, exchange, series, trade_date) at upsert
+    time. Known tradeoff: the '#'-suffixed variant is usually sparse/
+    non-contiguous, so it will rarely accumulate 14 consecutive rows and
+    its RSI14 will mostly stay NULL -- expected, not a bug (see the
+    changelog's table-level comment for more).
     """
     results = []
-    for isin, group in df.groupby("isin", sort=False):
+    for (isin, exchange, series, symbol), group in df.groupby(["isin", "exchange", "series", "symbol"], sort=False):
         group_sorted = group.sort_values("trade_date")
         results.append(compute_rsi14_for_isin(group_sorted))
     return pd.concat(results, ignore_index=True)

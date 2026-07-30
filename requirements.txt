@@ -1,3 +1,7 @@
 requests
 psycopg2-binary
 pandas
+yfinance
+tradingview-screener
+nse
+bse
