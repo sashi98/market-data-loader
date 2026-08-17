@@ -1,30 +1,48 @@
-# loaders/bhavcopy_loader.py
+# loaders/bhav_copy_with_corporate_action_loader.py
 #
-# market-data-loader -- BhavCopy backfill loader.
+# market-data-loader -- BhavCopy + Corporate Actions backfill loader.
 #
-# FULL SCOPE (all steps implemented) --
+# Redesigned flow (two clear phases, each fully self-contained:
+# download -> parse -> save -> update metadata):
+#
 #   Step 0: Load + validate config/.env, pre-flight health check,
 #           admin authentication (JWT for /api/holidays/sync/{year}),
 #           direct DB connectivity check
-#   Step 1: Prompt for to_date (defaults to today/yesterday per the 8pm
-#           BhavCopy-availability cutoff) and from_date (always typed),
-#           derive the actual trading_date_list between them (weekends +
-#           holidays excluded)
-#   Step 2: Download NSE (zip) + BSE (direct CSV) BhavCopy files for each
-#           trading date into MARKET_DATA_LOADER_DOWNLOAD_DIR
-#   Step 3: Parse + persist NSE then BSE per date -- both exchanges do a
-#           plain batch insert, independent transactions, no cross-
-#           exchange lookup or merge of any kind
-#   Step 4: Summary report -- date-range breakdown (fully/partially/fully
-#           failed), total rows persisted per exchange, elapsed time,
-#           and a list of every error encountered with its exact message
+#   Step 1: Prompt for a trade date range (d1/d2), derive the actual
+#           trading_date_list between them (weekends + holidays excluded)
+#   Step 2: Process bhav copy
+#             - download NSE (zip) + BSE (direct CSV) files for each
+#               trading date from d1 to d2
+#             - parse each file
+#             - save (persist) to bhav_copy
+#             - update bhav_copy_metadata (upserted automatically per
+#               date/exchange as part of the save step)
+#   Step 3: Process corporate actions
+#             - download NSE + BSE corporate actions CSV covering the
+#               WHOLE d1-d2 range in one call per exchange (unlike bhav
+#               copy, these endpoints are genuinely date-range-aware --
+#               see core/corporate_actions/corporate_actions_downloader.py)
+#             - parse (resolve isin -> reshape) + save (persist ->
+#               reconcile) each exchange's rows
+#             - update corporate_actions_metadata (one row per
+#               (exchange, from_date, to_date), upserted with the run
+#               outcome)
+#   Step 4: Summary report -- RUN COMPLETE
+#
+# Both phases reuse existing shared modules rather than duplicating
+# logic: bhav copy's download/parse/persist calls straight into
+# core/bhavcopy/*; corporate actions calls straight into
+# core/corporate_actions/csv_pipeline.py's download_corporate_actions_csv()
+# / process_corporate_actions_rows() -- the same functions
+# corporate_actions_loader.py (manual, corporate-actions-only) and
+# stock-py-services (auto-triggered, single-date) use.
 #
 # Exposes run() -- the standard entry point every loader under loaders/
 # provides, so main.py can invoke any loader generically without knowing
 # its internals.
 #
 # Can also be run standalone for development/testing:
-#   python bhavcopy_loader.py
+#   python bhav_copy_with_corporate_action_loader.py
 
 import sys
 import time
@@ -51,6 +69,18 @@ from core.bhavcopy.bhavcopy_downloader import (
 from core.db_client import get_connection, test_connection, DbConnectionError
 from core.bhavcopy.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
 from core.bhavcopy.bhavcopy_persistence import persist_nse, persist_bse, is_already_persisted, BhavCopyPersistenceError
+from core.corporate_actions.corporate_actions_downloader import CorporateActionsDownloadError
+from core.corporate_actions.corporate_actions_persistence import (
+    upsert_corporate_actions_metadata,
+    CorporateActionsPersistenceError,
+)
+from core.corporate_actions.pipeline import CorporateActionsPipelineError
+from core.corporate_actions.csv_pipeline import (
+    download_corporate_actions_csv,
+    process_corporate_actions_rows,
+    CorporateActionsCsvPipelineError,
+    SUPPORTED_EXCHANGES as CORPORATE_ACTIONS_EXCHANGES,
+)
 from core.logging_setup import start_run_logging
 
 DATE_INPUT_FORMAT = "%d%m%Y"  # DDMMYYYY
@@ -111,7 +141,7 @@ def step_0():
 
 def step_1(env_values, jwt_token):
     print("\n" + "=" * 60)
-    print("  STEP 1 -- Build trading date list")
+    print("  STEP 1 -- Ask trade date range (d1 - d2)")
     print("=" * 60)
 
     tmt_app_base_url = env_values["TMT_APP_BASE_URL"]
@@ -165,7 +195,7 @@ def step_1(env_values, jwt_token):
     print(f"  Holidays excluded: {holiday_count}")
     print(f"  Total calendar days: {total_calendar_days} "
           f"({num_days} trading + {weekend_count} weekends + {holiday_count} holidays)")
-    print(f"BhavCopy will be fetched from {from_date_confirm_str} to {to_date_confirm_str}")
+    print(f"BhavCopy + Corporate Actions will be fetched from {from_date_confirm_str} to {to_date_confirm_str}")
 
     confirm = input("Continue Y/N: ").strip().upper()
     if confirm != "Y":
@@ -184,10 +214,13 @@ def step_1(env_values, jwt_token):
     }
 
 
-def step_2(env_values, trading_date_list):
-    print("\n" + "=" * 60)
-    print("  STEP 2 -- Download BhavCopy files (NSE + BSE)")
-    print("=" * 60)
+def download_bhavcopy_files(env_values, trading_date_list):
+    """
+    Bhav copy download, standalone -- reused as-is by
+    bhavcopy_downloader_loader.py (download-only, no DB writes), and
+    called as Step 2's [2.1] sub-step below.
+    """
+    print("\n[2.1] Downloading bhav copy files (NSE + BSE) ...")
 
     download_dir = env_values["MARKET_DATA_LOADER_DOWNLOAD_DIR"]
     total = len(trading_date_list)
@@ -255,9 +288,7 @@ def step_2(env_values, trading_date_list):
     bse_only_count = sum(1 for v in date_bc_map.values() if v[1] and not v[0])
     neither_count = sum(1 for v in date_bc_map.values() if not v[0] and not v[1])
 
-    print("\n" + "=" * 60)
-    print("  STEP 2 COMPLETE")
-    print("=" * 60)
+    print("\n[2.1] Download complete.")
     print(f"  Both exchanges downloaded: {both_count}")
     print(f"  NSE only:                  {nse_only_count}")
     print(f"  BSE only:                  {bse_only_count}")
@@ -272,10 +303,13 @@ def step_2(env_values, trading_date_list):
     }
 
 
-def step_3(env_values, trading_date_list, date_bc_map):
-    print("\n" + "=" * 60)
-    print("  STEP 3 -- Parse and persist (NSE then BSE, per date)")
-    print("=" * 60)
+def parse_and_persist_bhavcopy(env_values, trading_date_list, date_bc_map):
+    """
+    Bhav copy parse + save, standalone -- called as Step 2's [2.2]/[2.3]
+    sub-step below. bhav_copy_metadata is updated automatically as part
+    of persist_nse()/persist_bse() on success -- see [2.4] print below.
+    """
+    print("\n[2.2] Parsing + persisting bhav copy (NSE then BSE, per date) ...")
 
     try:
         conn = get_connection(env_values)
@@ -300,7 +334,7 @@ def step_3(env_values, trading_date_list, date_bc_map):
             nse_ok = None
             bse_ok = None
 
-            # -- NSE: parse then persist --
+            # -- NSE: parse then persist (persist also upserts bhav_copy_metadata) --
             if nse_path:
                 if is_already_persisted(conn, trade_date, "NSE"):
                     print("  [SKIP] NSE already persisted for this date (re-run safe)")
@@ -310,7 +344,7 @@ def step_3(env_values, trading_date_list, date_bc_map):
                     try:
                         rows = parse_bhavcopy_csv(nse_path, trade_date)
                         persist_nse(conn, rows, trade_date, nse_path, start_time_ms)
-                        print(f"  [OK] NSE persisted -- {len(rows)} rows")
+                        print(f"  [OK] NSE persisted -- {len(rows)} rows (bhav_copy_metadata updated)")
                         nse_ok = True
                         total_nse_rows += len(rows)
                     except BhavCopyParseError as e:
@@ -334,7 +368,7 @@ def step_3(env_values, trading_date_list, date_bc_map):
                     try:
                         rows = parse_bhavcopy_csv(bse_path, trade_date)
                         persist_bse(conn, rows, trade_date, bse_path, start_time_ms)
-                        print(f"  [OK] BSE persisted -- {len(rows)} rows")
+                        print(f"  [OK] BSE persisted -- {len(rows)} rows (bhav_copy_metadata updated)")
                         bse_ok = True
                         total_bse_rows += len(rows)
                     except BhavCopyParseError as e:
@@ -357,9 +391,7 @@ def step_3(env_values, trading_date_list, date_bc_map):
     bse_only_ok = sum(1 for s in date_status.values() if s["BSE"] is True and s["NSE"] is not True)
     neither_ok = sum(1 for s in date_status.values() if s["NSE"] is not True and s["BSE"] is not True)
 
-    print("\n" + "=" * 60)
-    print("  STEP 3 COMPLETE")
-    print("=" * 60)
+    print("\n[2.2]/[2.3]/[2.4] Parse + save + metadata update complete.")
     print(f"  Both exchanges persisted: {both_ok}")
     print(f"  NSE only:                 {nse_only_ok}")
     print(f"  BSE only:                 {bse_only_ok}")
@@ -373,16 +405,183 @@ def step_3(env_values, trading_date_list, date_bc_map):
     }
 
 
-def step_4(step_1_context, step_3_context, elapsed_seconds):
+def step_2_process_bhav_copy(env_values, trading_date_list):
     print("\n" + "=" * 60)
-    print("  STEP 4 -- Summary report")
+    print("  STEP 2 -- Process bhav copy (download -> parse -> save -> update metadata)")
+    print("=" * 60)
+
+    download_context = download_bhavcopy_files(env_values, trading_date_list)
+    parse_persist_context = parse_and_persist_bhavcopy(env_values, trading_date_list, download_context["date_bc_map"])
+
+    print("\n" + "=" * 60)
+    print("  STEP 2 COMPLETE")
+    print("=" * 60)
+
+    return {
+        "date_bc_map": download_context["date_bc_map"],
+        "date_status": parse_persist_context["date_status"],
+        "total_nse_rows": parse_persist_context["total_nse_rows"],
+        "total_bse_rows": parse_persist_context["total_bse_rows"],
+        "errors": parse_persist_context["errors"],
+    }
+
+
+def download_corporate_actions(from_date, to_date):
+    """
+    Corporate actions download, standalone -- called as Step 3's [3.1]
+    sub-step below. One call per exchange for the WHOLE range (not
+    per-date, unlike bhav copy -- these endpoints are genuinely
+    date-range-aware, see core/corporate_actions/corporate_actions_downloader.py).
+    """
+    print("\n[3.1] Downloading corporate actions CSV (NSE + BSE, whole range) ...")
+
+    from_display = from_date.strftime("%d-%b-%Y")
+    to_display = to_date.strftime("%d-%b-%Y")
+    print(f"\nRange: {from_display} to {to_display}")
+
+    exchange_raw_rows = {}
+    download_errors = {}
+
+    for exchange in CORPORATE_ACTIONS_EXCHANGES:
+        print(f"\n[{exchange}] Downloading corporate actions CSV ...")
+        try:
+            raw_rows = download_corporate_actions_csv(exchange, from_date, to_date)
+            print(f"  [OK] {exchange} downloaded -- {len(raw_rows)} rows")
+            exchange_raw_rows[exchange] = raw_rows
+        except CorporateActionsDownloadError as e:
+            print(f"  [FAILED] {exchange} download error: {e}")
+            download_errors[exchange] = str(e)
+        except CorporateActionsCsvPipelineError as e:
+            print(f"  [FAILED] {exchange} unsupported: {e}")
+            download_errors[exchange] = str(e)
+
+    print("\n[3.1] Download complete.")
+    print(f"  Exchanges downloaded: {len(exchange_raw_rows)}/{len(CORPORATE_ACTIONS_EXCHANGES)}")
+
+    return {
+        "exchange_raw_rows": exchange_raw_rows,
+        "download_errors": download_errors,
+    }
+
+
+def parse_and_persist_corporate_actions(env_values, from_date, to_date, download_context):
+    """
+    Corporate actions parse + save + update metadata, standalone --
+    called as Step 3's [3.2] sub-step below. Each exchange runs in its
+    own DB transaction, so a BSE failure doesn't roll back NSE.
+    corporate_actions_metadata is upserted by (exchange, from_date,
+    to_date) with the outcome, whether the run succeeded or failed.
+    """
+    print("\n[3.2] Parsing + persisting corporate actions + updating metadata (NSE + BSE) ...")
+
+    exchange_raw_rows = download_context["exchange_raw_rows"]
+    download_errors = download_context["download_errors"]
+    from_date_str = from_date.strftime(DATE_INPUT_FORMAT)
+    to_date_str = to_date.strftime(DATE_INPUT_FORMAT)
+
+    results = {}
+
+    # A download failure for an exchange is recorded as a FAILED metadata
+    # row too -- so corporate_actions_metadata always reflects what
+    # actually happened for this range, not just the runs that made it
+    # past [3.1].
+    for exchange, error_message in download_errors.items():
+        print(f"\n[{exchange}] Skipped -- download failed in [3.1]: {error_message}")
+        try:
+            conn = get_connection(env_values)
+            try:
+                upsert_corporate_actions_metadata(
+                    conn, exchange, from_date, to_date, run_status="FAILED",
+                    summary=None, processing_time_ms=None, error_message=error_message,
+                )
+                conn.commit()
+            except CorporateActionsPersistenceError as e:
+                conn.rollback()
+                print(f"  [FAILED] Could not record metadata for {exchange}: {e}")
+            finally:
+                conn.close()
+        except DbConnectionError as e:
+            print(f"  [FAILED] Could not connect to DB to record metadata for {exchange}: {e}")
+        results[exchange] = {"run_status": "FAILED", "error_message": error_message, "summary": None}
+
+    for exchange, raw_rows in exchange_raw_rows.items():
+        print(f"\n[{exchange}] Parsing + persisting {len(raw_rows)} downloaded rows ...")
+        start_time_ms = time.time() * 1000
+        try:
+            conn = get_connection(env_values)
+        except DbConnectionError as e:
+            print(f"  [FAILED] {exchange} DB connection error: {e}")
+            results[exchange] = {"run_status": "FAILED", "error_message": str(e), "summary": None}
+            continue
+
+        try:
+            summary = process_corporate_actions_rows(conn, exchange, raw_rows, from_date, to_date)
+            processing_time_ms = int((time.time() * 1000) - start_time_ms)
+            upsert_corporate_actions_metadata(
+                conn, exchange, from_date, to_date, run_status="SUCCESS",
+                summary=summary, processing_time_ms=processing_time_ms, error_message=None,
+            )
+            conn.commit()
+            persisted = summary.get("nse_parsed_count", 0) + summary.get("bse_parsed_count", 0)
+            print(f"  [OK] {exchange} persisted -- {persisted} rows, "
+                  f"unresolved isin {summary.get('unresolved_isin_count', 0)}, "
+                  f"newly matched {len(summary.get('newly_matched_keys') or [])} "
+                  f"(corporate_actions_metadata updated)")
+            results[exchange] = {"run_status": "SUCCESS", "error_message": None, "summary": summary}
+        except (CorporateActionsPipelineError, CorporateActionsPersistenceError, CorporateActionsCsvPipelineError) as e:
+            conn.rollback()
+            error_message = str(e)
+            print(f"  [FAILED] {exchange} processing error: {error_message}")
+            processing_time_ms = int((time.time() * 1000) - start_time_ms)
+            try:
+                upsert_corporate_actions_metadata(
+                    conn, exchange, from_date, to_date, run_status="FAILED",
+                    summary=None, processing_time_ms=processing_time_ms, error_message=error_message,
+                )
+                conn.commit()
+            except CorporateActionsPersistenceError as meta_e:
+                conn.rollback()
+                print(f"  [FAILED] Could not record FAILED metadata for {exchange}: {meta_e}")
+            results[exchange] = {"run_status": "FAILED", "error_message": error_message, "summary": None}
+        finally:
+            conn.close()
+
+    print("\n[3.2] Parse + save + metadata update complete.")
+    success_count = sum(1 for r in results.values() if r["run_status"] == "SUCCESS")
+    print(f"  Exchanges processed successfully: {success_count}/{len(CORPORATE_ACTIONS_EXCHANGES)}")
+
+    return {
+        "results": results,
+        "from_date_str": from_date_str,
+        "to_date_str": to_date_str,
+    }
+
+
+def step_3_process_corporate_actions(env_values, from_date, to_date):
+    print("\n" + "=" * 60)
+    print("  STEP 3 -- Process corporate actions (download -> parse -> save -> update metadata)")
+    print("=" * 60)
+
+    download_context = download_corporate_actions(from_date, to_date)
+    result = parse_and_persist_corporate_actions(env_values, from_date, to_date, download_context)
+
+    print("\n" + "=" * 60)
+    print("  STEP 3 COMPLETE")
+    print("=" * 60)
+
+    return result
+
+
+def step_4_summary(step_1_context, step_2_context, step_3_context, elapsed_seconds):
+    print("\n" + "=" * 60)
+    print("  STEP 4 -- Summary report (FINISH)")
     print("=" * 60)
 
     trading_date_list = step_1_context["trading_date_list"]
-    date_status = step_3_context["date_status"]
-    total_nse_rows = step_3_context["total_nse_rows"]
-    total_bse_rows = step_3_context["total_bse_rows"]
-    errors = step_3_context["errors"]
+    date_status = step_2_context["date_status"]
+    total_nse_rows = step_2_context["total_nse_rows"]
+    total_bse_rows = step_2_context["total_bse_rows"]
+    errors = step_2_context["errors"]
 
     both_ok = [d for d, s in date_status.items() if s["NSE"] is True and s["BSE"] is True]
     nse_only_ok = [d for d, s in date_status.items() if s["NSE"] is True and s["BSE"] is not True]
@@ -395,6 +594,8 @@ def step_4(step_1_context, step_3_context, elapsed_seconds):
     minutes, seconds = divmod(int(elapsed_seconds), 60)
 
     print(f"\nRange:                      {from_date_str} to {to_date_str}")
+
+    print(f"\nBhav copy:")
     print(f"Total trading dates targeted: {len(trading_date_list)}")
     print(f"  Fully successful (both):    {len(both_ok)}")
     print(f"  Partially successful:       {len(nse_only_ok) + len(bse_only_ok)}")
@@ -405,19 +606,29 @@ def step_4(step_1_context, step_3_context, elapsed_seconds):
     print(f"  Fully failed (neither):     {len(neither_ok)}")
     if neither_ok:
         print("    Dates: " + ", ".join(d.strftime('%d-%b-%Y') for d in sorted(neither_ok)))
+    print(f"  Rows persisted -- NSE: {total_nse_rows}, BSE: {total_bse_rows}")
 
-    print(f"\nRows persisted:")
-    print(f"  NSE: {total_nse_rows}")
-    print(f"  BSE: {total_bse_rows}")
+    print(f"\nCorporate actions ({step_3_context['from_date_str']} to {step_3_context['to_date_str']}):")
+    for exch in CORPORATE_ACTIONS_EXCHANGES:
+        exch_result = step_3_context["results"].get(exch, {})
+        status = exch_result.get("run_status", "SKIPPED")
+        if status == "SUCCESS":
+            summary = exch_result.get("summary") or {}
+            print(f"  {exch}: SUCCESS -- downloaded {summary.get('total_rows_downloaded', 0)}, "
+                  f"persisted {summary.get('nse_parsed_count', 0) + summary.get('bse_parsed_count', 0)}, "
+                  f"unresolved isin {summary.get('unresolved_isin_count', 0)}, "
+                  f"newly matched {len(summary.get('newly_matched_keys') or [])}")
+        else:
+            print(f"  {exch}: {status} -- {exch_result.get('error_message', 'no details')}")
 
     print(f"\nElapsed time: {minutes}m {seconds}s")
 
     if errors:
-        print(f"\nErrors ({len(errors)}):")
+        print(f"\nBhav copy errors ({len(errors)}):")
         for err in errors:
             print(f"  [{err['date'].strftime('%d-%b-%Y')}] {err['exchange']}: {err['error']}")
     else:
-        print("\nNo errors encountered.")
+        print("\nNo bhav copy errors encountered.")
 
     print("\n" + "=" * 60)
     print("  RUN COMPLETE")
@@ -426,18 +637,21 @@ def step_4(step_1_context, step_3_context, elapsed_seconds):
 
 def run():
     """Standard entry point called by main.py (or directly, standalone)."""
-    with start_run_logging("bhavcopy_loader"):
+    with start_run_logging("bhav_copy_with_corporate_action_loader"):
         run_start_time = time.time()
         step_0_context = step_0()
         step_1_context = step_1(step_0_context["env_values"], step_0_context["jwt_token"])
-        step_2_context = step_2(step_0_context["env_values"], step_1_context["trading_date_list"])
-        step_3_context = step_3(
+        step_2_context = step_2_process_bhav_copy(
             step_0_context["env_values"],
             step_1_context["trading_date_list"],
-            step_2_context["date_bc_map"],
+        )
+        step_3_context = step_3_process_corporate_actions(
+            step_0_context["env_values"],
+            step_1_context["from_date"],
+            step_1_context["to_date"],
         )
         elapsed_seconds = time.time() - run_start_time
-        step_4(step_1_context, step_3_context, elapsed_seconds)
+        step_4_summary(step_1_context, step_2_context, step_3_context, elapsed_seconds)
 
 
 if __name__ == "__main__":

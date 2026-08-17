@@ -4,7 +4,7 @@
 #
 # Same Step 0 (minus the DB check, since this loader never touches the
 # DB) + Step 1 (trading date list, via explicit from_date/to_date) +
-# Step 2 (download) as bhavcopy_loader, but stops there -- no parsing,
+# Step 2 (download) as bhav_copy_with_corporate_action_loader, but stops there -- no parsing,
 # no persistence, no summary report.
 #
 # Useful for:
@@ -12,7 +12,7 @@
 #     expected format/URL for an old date, before committing to a large
 #     backfill (e.g. testing the far end of a 3-year lookback with a
 #     single-day from_date/to_date range before running the full range
-#     through bhavcopy_loader)
+#     through bhav_copy_with_corporate_action_loader)
 #   - Just wanting the raw CSV/ZIP files on disk without a DB dependency
 #
 # Exposes run() -- the standard entry point every loader under loaders/
@@ -38,16 +38,17 @@ from core.trading_calendar import (
 )
 from core.logging_setup import start_run_logging
 
-# Reuse the same Step 2 logic from bhavcopy_loader -- imported directly
-# rather than duplicated, so both loaders always stay in sync.
-from loaders.bhavcopy_loader import step_2
+# Reuse the same bhav copy download logic from
+# bhav_copy_with_corporate_action_loader -- imported directly rather
+# than duplicated, so both loaders always stay in sync.
+from loaders.bhav_copy_with_corporate_action_loader import download_bhavcopy_files
 
 DATE_INPUT_FORMAT = "%d%m%Y"  # DDMMYYYY
 
 
 def step_0_download_only():
     """
-    Same as bhavcopy_loader.step_0(), minus the DB connectivity check --
+    Same as bhav_copy_with_corporate_action_loader.step_0(), minus the DB connectivity check --
     this loader never writes to the DB, so requiring a DB connection
     would be an unnecessary blocker.
     """
@@ -157,7 +158,7 @@ def run():
     with start_run_logging("bhavcopy_downloader_loader"):
         step_0_context = step_0_download_only()
         step_1_context = step_1_dates_only(step_0_context["env_values"], step_0_context["jwt_token"])
-        step_2(step_0_context["env_values"], step_1_context["trading_date_list"])
+        download_bhavcopy_files(step_0_context["env_values"], step_1_context["trading_date_list"])
         print("\n(Download-only loader -- no parse/persist/summary. Files are on disk under MARKET_DATA_LOADER_DOWNLOAD_DIR.)")
 
 

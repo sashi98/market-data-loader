@@ -26,8 +26,26 @@
 # window, avg_gain == avg_loss == 0) would crash the incremental path if
 # not branched explicitly. This bit the abandoned Java version too
 # (WilderRsiMath.java had the same explicit branching, using BigDecimal).
+#
+# DISPLAY PRECISION (Sashikant's call) -- compute_rsi14()'s return value
+# is rounded to 2 decimal places before it's handed back to callers.
+# avg_gain/avg_loss themselves are NEVER rounded here -- seed()/step()
+# still carry full float precision so the Wilder recurrence doesn't
+# compound rounding error day over day (rounding an intermediate average
+# to 2dp every single day would drift the whole walk measurably over a
+# multi-year history). Only the final, once-per-row rsi14 figure is
+# rounded, using Decimal + ROUND_HALF_UP rather than plain round() (which
+# is round-half-to-even) to match the HALF_UP convention the Java side
+# (SafeValue.getNumericValueScaled) already uses everywhere else.
+
+from decimal import Decimal, ROUND_HALF_UP
 
 RSI_PERIOD = 14
+
+
+def _round2(value):
+    """Round a float to exactly 2 decimal places, HALF_UP, returned as a float."""
+    return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
 def compute_gain_loss(close, prev_close):
@@ -102,4 +120,4 @@ def compute_rsi14(avg_gain, avg_loss):
         return 100.0
 
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    return _round2(100 - (100 / (1 + rs)))

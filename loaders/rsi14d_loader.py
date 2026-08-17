@@ -7,19 +7,22 @@
 # FULL SCOPE --
 #   Step 0: Load + validate config/.env, direct DB connectivity check.
 #           No health check / auth step needed here (unlike
-#           bhavcopy_loader) -- this script only ever talks to Postgres
+#           bhav_copy_with_corporate_action_loader) -- this script only ever talks to Postgres
 #           directly, never to the TMT REST API.
 #   Step 1: Fetch isin/exchange/series/symbol/trade_date/close from
 #           bhav_copy, ONE EXCHANGE AT A TIME (NSE first, then BSE) --
 #           see note below on why.
 #   Step 2: Compute RSI14 (Wilder's smoothing, hand-implemented -- see
 #           core/rsi/rsi_calculator.py for why pandas_ta.rma() was
-#           rejected) per isin+exchange+series+symbol, for the current
-#           exchange's rows only.
+#           rejected) per isin+exchange (continuity-bridged across any
+#           series relabel -- see core/rsi/rsi_continuity.py), for the
+#           current exchange's rows only.
 #   Step 3: Batch upsert gain/loss/avg_gain/avg_loss/rsi14 into
 #           rsi14d_workbook for the current exchange, keyed on
-#           (isin, exchange, series, symbol, trade_date), before moving
-#           on to the next exchange.
+#           (isin, exchange, trade_date) -- see 014.02.00's changelog
+#           comment (tmt/src/main/resources/db/changelog) for why SERIES/
+#           SYMBOL are no longer part of the key -- before moving on to
+#           the next exchange.
 #   Step 4: Combined summary report across all exchanges -- rows
 #           processed, isins covered, date range, elapsed time.
 #
@@ -60,6 +63,7 @@ from core.env_validator import load_and_validate_env, EnvValidationError
 from core.db_client import get_connection, test_connection, DbConnectionError
 from core.rsi.rsi_calculator import compute_rsi14_all
 from core.rsi.rsi_persistence import fetch_bhav_copy_closes, upsert_rsi14d_workbook, RsiPersistenceError
+from core.rsi.rsi_continuity import fetch_trading_calendar, build_calendar_index, RsiContinuityError
 from core.logging_setup import start_run_logging
 
 EXCHANGES = ["NSE", "BSE"]
@@ -95,7 +99,7 @@ def step_0():
 
 def step_1(conn, exchange):
     print("\n" + "=" * 60)
-    print(f"  STEP 1 -- Fetch bhav_copy closes ({exchange} only, EQUITY series category)")
+    print(f"  STEP 1 -- Fetch bhav_copy closes ({exchange} only, continuity-eligible rows)")
     print("=" * 60)
 
     try:
@@ -112,17 +116,22 @@ def step_1(conn, exchange):
         print(f"  [WARNING] No rows found for exchange={exchange} -- skipping.")
         date_min = date_max = None
         series_counts = {}
-        combo_count = 0
+        migrated_isin_count = 0
     else:
         date_min = df["trade_date"].min()
         date_max = df["trade_date"].max()
         series_counts = df.groupby("series")["isin"].nunique().to_dict()
-        combo_count = df.groupby(["isin", "series", "symbol"]).ngroups
+        # Isins whose winning series changed at least once within the
+        # fetched window -- e.g. an EQ<->BE relabel. These are exactly
+        # the cases the continuity fix (isin+exchange grouping, no
+        # longer isin+exchange+series+symbol) now keeps as one
+        # unbroken RSI walk instead of fragmenting.
+        migrated_isin_count = (df.groupby("isin")["series"].nunique() > 1).sum()
 
-        print(f"  [OK] Fetched {row_count} rows across {isin_count} isins "
-              f"({combo_count} distinct isin+series+symbol combinations)")
+        print(f"  [OK] Fetched {row_count} rows across {isin_count} isins")
         print(f"  Date range: {date_min} to {date_max}")
-        print("  Isins by series:")
+        print(f"  Isins with more than one series in this window (continuity-bridged): {migrated_isin_count}")
+        print("  Rows by series (post-eligibility-filter):")
         for series, count in sorted(series_counts.items()):
             print(f"    {series:<8} {count}")
 
@@ -132,22 +141,22 @@ def step_1(conn, exchange):
 
     return {"df": df, "isin_count": isin_count, "row_count": row_count,
             "date_min": date_min, "date_max": date_max,
-            "series_counts": series_counts, "combo_count": combo_count}
+            "series_counts": series_counts, "migrated_isin_count": migrated_isin_count}
 
 
-def step_2(df, exchange):
+def step_2(df, exchange, calendar_index):
     print("\n" + "=" * 60)
-    print(f"  STEP 2 -- Compute RSI14 (Wilder's smoothing) for {exchange}, per isin+series+symbol")
+    print(f"  STEP 2 -- Compute RSI14 (Wilder's smoothing) for {exchange}, per isin+exchange")
     print("=" * 60)
 
-    combo_count = df.groupby(["isin", "series", "symbol"]).ngroups
-    print(f"\n  Processing {combo_count} isin+series+symbol series for {exchange} ...")
-    rsi_df = compute_rsi14_all(df)
+    isin_count = df["isin"].nunique()
+    print(f"\n  Processing {isin_count} isins for {exchange} ...")
+    rsi_df = compute_rsi14_all(df, calendar_index=calendar_index)
 
     populated_count = rsi_df["rsi14"].notna().sum()
     pre_seed_count = len(rsi_df) - populated_count
     print(f"  [OK] Computed {len(rsi_df)} rows ({populated_count} with a non-NULL RSI14, "
-          f"{pre_seed_count} pre-seed rows within each series' first 14 trading days)")
+          f"{pre_seed_count} pre-seed/post-gap-reseed rows)")
 
     print("\n" + "=" * 60)
     print(f"  STEP 2 COMPLETE ({exchange})")
@@ -186,7 +195,7 @@ def step_4(per_exchange_results, elapsed_seconds):
 
     total_row_count = sum(r["row_count"] for r in per_exchange_results.values())
     total_isin_count = sum(r["isin_count"] for r in per_exchange_results.values())
-    total_combo_count = sum(r["combo_count"] for r in per_exchange_results.values())
+    total_migrated_isin_count = sum(r["migrated_isin_count"] for r in per_exchange_results.values())
     total_populated = sum(r["populated_count"] for r in per_exchange_results.values())
     total_pre_seed = sum(r["pre_seed_count"] for r in per_exchange_results.values())
     total_written = sum(r["written_count"] for r in per_exchange_results.values())
@@ -200,22 +209,22 @@ def step_4(per_exchange_results, elapsed_seconds):
 
     print(f"\nDate range processed:                {date_min} to {date_max}")
     print(f"Isins processed (sum across exch.):  {total_isin_count}")
-    print(f"Isin+exchange+series+symbol combos:  {total_combo_count}")
+    print(f"Isins with a series change (bridged):{total_migrated_isin_count}")
     print(f"Rows fetched:                        {total_row_count}")
     print(f"Rows with RSI14 value:               {total_populated}")
-    print(f"Pre-seed rows (no RSI yet):          {total_pre_seed}")
+    print(f"Pre-seed/post-gap-reseed rows:        {total_pre_seed}")
     print(f"Rows written:                        {total_written}")
 
     print("\nPer-exchange breakdown:")
     for exchange, r in per_exchange_results.items():
         print(f"  {exchange}:")
         print(f"    Isins:                {r['isin_count']}")
-        print(f"    Isin+series+symbol combos: {r['combo_count']}")
+        print(f"    Isins with series change: {r['migrated_isin_count']}")
         print(f"    Rows fetched:         {r['row_count']}")
         print(f"    Rows with RSI14:      {r['populated_count']}")
         print(f"    Pre-seed rows:        {r['pre_seed_count']}")
         print(f"    Rows written:         {r['written_count']}")
-        print("    Isins by series:")
+        print("    Rows by series:")
         for series, count in sorted(r["series_counts"].items()):
             print(f"      {series:<8} {count}")
 
@@ -253,6 +262,16 @@ def run():
             print(f"  [FAILED] {e}")
             sys.exit(1)
 
+        print("\n[0.3] Fetching the shared trading-session calendar (bhav_copy_metadata) ...")
+        try:
+            calendar_dates = fetch_trading_calendar(conn)
+            calendar_index = build_calendar_index(calendar_dates)
+        except RsiContinuityError as e:
+            print(f"  [FAILED] {e}")
+            conn.close()
+            sys.exit(1)
+        print(f"  [OK] {len(calendar_dates)} real trading sessions loaded for gap detection.")
+
         per_exchange_results = {}
         try:
             for exchange in EXCHANGES:
@@ -265,7 +284,7 @@ def run():
                     }
                     continue
 
-                step_2_context = step_2(step_1_context["df"], exchange)
+                step_2_context = step_2(step_1_context["df"], exchange, calendar_index)
                 step_3_context = step_3(conn, step_2_context["rsi_df"], exchange)
 
                 per_exchange_results[exchange] = {
@@ -274,7 +293,7 @@ def run():
                     "date_min": step_1_context["date_min"],
                     "date_max": step_1_context["date_max"],
                     "series_counts": step_1_context["series_counts"],
-                    "combo_count": step_1_context["combo_count"],
+                    "migrated_isin_count": step_1_context["migrated_isin_count"],
                     "populated_count": step_2_context["populated_count"],
                     "pre_seed_count": step_2_context["pre_seed_count"],
                     "written_count": step_3_context["written_count"],

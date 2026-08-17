@@ -4,7 +4,7 @@
 # not an automated test. Answers: "how many trading days, walking
 # backward from to_date, does it take to reach (or pass) target_date?" --
 # using the REAL holiday-aware logic in core/trading_calendar.py (same
-# function bhavcopy_loader.py itself uses), not an estimate.
+# function bhav_copy_with_corporate_action_loader.py itself uses), not an estimate.
 #
 # Usage, from repo root:
 #   python tests/count_trading_days_manual.py
@@ -90,7 +90,7 @@ def main():
     print(f"  Holidays excluded:    {holiday_count}")
     print(f"  TRADING DAYS:         {trading_days}")
     print("=" * 50)
-    print(f"\n-> bhavcopy_loader.py now takes from_date/to_date directly (not a day")
+    print(f"\n-> bhav_copy_with_corporate_action_loader.py now takes from_date/to_date directly (not a day")
     print(f"   count) -- just type from_date={TARGET_DATE.strftime('%d%m%Y')} at its prompt.")
     print(f"   This script's TRADING DAYS figure above is informational only, so you")
     print(f"   know roughly how much work that range represents before running it.")
