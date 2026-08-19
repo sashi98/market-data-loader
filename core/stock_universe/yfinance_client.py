@@ -8,10 +8,23 @@
 # reasonable assumptions never independently verified. Treat the
 # "UNCONFIRMED" ones as a checklist for whoever eventually watches this
 # run for real, not as settled fact.
+#
+# RETRY ADDED 2026-08-19: the ticker.info fetch below now goes through
+# core.retry.call_with_retry first, so a transient network blip (e.g.
+# `curl: (16)`, an HTTP2 framing-layer error observed in a real
+# production run -- see core/retry.py's own header comment for the full
+# incident) gets a couple of extra attempts before this function's own
+# exception finally propagates to the caller. This does NOT change what
+# happens once every attempt is exhausted -- fetch_fundamentals's own
+# docstring/contract (raises, never swallows) is unchanged; callers
+# (stock_universe_update_listener.py's _resolve_nse_side/_resolve_bse_side)
+# already wrap this call in their own try/except.
 
 from datetime import datetime, timezone
 
 import yfinance as yf
+
+from core.retry import call_with_retry, MAX_ATTEMPTS
 
 # Deliberately conservative -- yfinance/Yahoo Finance is known to
 # rate-limit or outright block aggressive scraping. This delay is PER
@@ -56,14 +69,21 @@ def fetch_fundamentals(ticker_symbol):
     "found nothing" and "found some fields" the same way -- just check
     truthiness.
 
-    Raises whatever yfinance/network exception occurs -- this function
-    does NOT catch and swallow errors. Callers (the worker threads in
+    Raises whatever yfinance/network exception occurs, AFTER retrying a
+    couple of times first (see core/retry.py and this file's own header
+    comment) -- this function does NOT catch and swallow errors once
+    retries are exhausted. Callers (the worker threads in
     stock_universe_update_listener.py) are responsible for catching
     per-stock and continuing, matching the explicit design decision that
     one bad ticker must never abort the whole batch.
     """
     ticker = yf.Ticker(ticker_symbol)
-    info = ticker.info
+    info = call_with_retry(
+        lambda: ticker.info,
+        on_retry=lambda attempt, e: print(
+            f"    [retry {attempt}/{MAX_ATTEMPTS}] yfinance {ticker_symbol} -- {e}"
+        ),
+    )
 
     # yfinance sometimes returns a near-empty dict for a delisted or
     # simply wrong ticker, rather than raising an exception -- treat the

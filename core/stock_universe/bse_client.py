@@ -87,6 +87,21 @@
 # after the fact (CONFIRMED REAL: TradingView returned a market cap for
 # ATLPP nearly 20x its actual, confirmed-via-bseindia.com figure --
 # actively wrong data, not just absent).
+#
+# RETRY ADDED 2026-08-19: the equityMetaInfo call below now goes through
+# core.retry.call_with_retry first, so a transient network blip (e.g.
+# `curl: (16)`, an HTTP2 framing-layer error observed in a real
+# production run -- see core/retry.py's own header comment for the full
+# incident) gets a couple of extra attempts before this module's own
+# exception finally propagates to the caller (stock_universe_update_
+# listener.py's _resolve_bse_side, which already has a broad
+# except Exception around this call). This does NOT change what happens
+# once every attempt is exhausted -- a still-failing call raises exactly
+# the same way it always did.
+
+from core.retry import call_with_retry, MAX_ATTEMPTS
+
+
 class BseExcluded(Exception):
     """
     Raised (not returned) when equityMetaInfo's own IShow flag says this
@@ -125,11 +140,18 @@ def fetch_fundamentals_bse(bse_session, security_code):
     instruments -- see this file's own header comment). Callers should
     treat this exactly like nse_client.NseExcluded.
 
-    Raises whatever bse-package/network exception occurs otherwise --
-    same contract as nse_client.fetch_fundamentals_nse: callers catch
-    and log per-isin, this function does not swallow errors itself.
+    Raises whatever bse-package/network exception occurs otherwise, AFTER
+    retrying a couple of times first (see core/retry.py and this file's
+    own header comment) -- same contract as nse_client.fetch_fundamentals_nse:
+    callers catch and log per-isin, this function does not swallow errors
+    itself once retries are exhausted.
     """
-    meta = bse_session.equityMetaInfo(security_code)
+    meta = call_with_retry(
+        bse_session.equityMetaInfo, security_code,
+        on_retry=lambda attempt, e: print(
+            f"    [retry {attempt}/{MAX_ATTEMPTS}] BSE equityMetaInfo({security_code}) -- {e}"
+        ),
+    )
     if not meta:
         return {}, None
 

@@ -61,8 +61,22 @@
 # the other two tiers from being tried. NseExcluded is the ONLY
 # exception this module still lets escape, since it's a deliberate
 # signal based on successfully-retrieved data, not a failure.
+#
+# RETRY ADDED 2026-08-19: both network calls below (equityMetaInfo,
+# getDetailedScripData) now go through core.retry.call_with_retry
+# first, so a transient network blip (e.g. `curl: (16)`, an HTTP2
+# framing-layer error observed in a real production run -- see
+# core/retry.py's own header comment for the full incident) gets a
+# couple of extra attempts before this module falls back to its
+# existing "swallow and return {}/None" behavior. This does NOT change
+# what happens once every attempt is exhausted -- a still-failing call
+# degrades exactly the same way it always did; it just makes that
+# outcome less likely for a call that would have succeeded on a second
+# try moments later.
 
 from datetime import datetime
+
+from core.retry import call_with_retry, MAX_ATTEMPTS
 
 # Tried in order for exchanges containing "SME" -- 'ST' is confirmed
 # correct for at least one real stock (ACCPL); 'SM'/'SZ' are the other
@@ -96,10 +110,11 @@ class NseExcluded(Exception):
 def _get_exclusion_flags(nse_session, symbol):
     """
     Returns the exclusion reason string ("delisted") or None. Returns
-    None (not excluded) if equityMetaInfo itself fails for any reason --
-    an inability to CHECK the flag is not the same as confirming the
-    stock is fine to exclude, but it also shouldn't block enrichment
-    entirely; yfinance/TradingView can still proceed.
+    None (not excluded) if equityMetaInfo itself fails for any reason
+    (after retries -- see core/retry.py) -- an inability to CHECK the
+    flag is not the same as confirming the stock is fine to exclude,
+    but it also shouldn't block enrichment entirely; yfinance/TradingView
+    can still proceed.
 
     ONLY checks isDelisted now -- isETFSec/isDebtSec were removed after
     a confirmed real false positive on ADANIENT (a major NIFTY 50
@@ -107,7 +122,12 @@ def _get_exclusion_flags(nse_session, symbol):
     comment for why those two flags don't mean what their names suggest.
     """
     try:
-        meta = nse_session.equityMetaInfo(symbol)
+        meta = call_with_retry(
+            nse_session.equityMetaInfo, symbol,
+            on_retry=lambda attempt, e: print(
+                f"    [retry {attempt}/{MAX_ATTEMPTS}] NSE equityMetaInfo({symbol}) -- {e}"
+            ),
+        )
     except Exception:
         return None
 
@@ -120,14 +140,20 @@ def _get_detailed_scrip_data(nse_session, symbol, exchange):
     """
     Tries getDetailedScripData with the right series code(s) for this
     exchange. Returns the raw dict on the first successful call, or
-    None if every attempt failed (never raises -- see this module's
-    header comment for why).
+    None if every attempt (across every series candidate, each itself
+    retried -- see core/retry.py) failed (never raises -- see this
+    module's header comment for why).
     """
     series_candidates = SME_SERIES_CANDIDATES if "SME" in (exchange or "").upper() else ["EQ"]
 
     for series in series_candidates:
         try:
-            return nse_session.getDetailedScripData(symbol, series=series)
+            return call_with_retry(
+                nse_session.getDetailedScripData, symbol, series=series,
+                on_retry=lambda attempt, e, series=series: print(
+                    f"    [retry {attempt}/{MAX_ATTEMPTS}] NSE getDetailedScripData({symbol}, series={series}) -- {e}"
+                ),
+            )
         except Exception:
             continue
 
@@ -149,7 +175,8 @@ def fetch_fundamentals_nse(nse_session, symbol, exchange=None):
 
     Returns {} (never None) for anything that isn't a deliberate
     exclusion -- no data found, wrong series exhausted every candidate,
-    a network error, anything. See this module's header comment for
+    a network error that didn't recover after retrying (see
+    core/retry.py), anything. See this module's header comment for
     why ordinary failures are swallowed here rather than raised.
 
     Raises NseExcluded ONLY if equityMetaInfo's own flags say this isin

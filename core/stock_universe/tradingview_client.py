@@ -27,8 +27,21 @@
 # stock yfinance had zero data for) -- returned sector, industry,
 # market cap, P/E, EPS, debt-to-equity, and ROE, all matching real
 # published values (NSE's own site, TradingView's own screener UI).
+#
+# RETRY ADDED 2026-08-19: the get_scanner_data() call below now goes
+# through core.retry.call_with_retry first, so a transient network blip
+# (e.g. `curl: (16)`, an HTTP2 framing-layer error observed in a real
+# production run -- see core/retry.py's own header comment for the full
+# incident) gets a couple of extra attempts before this function's own
+# exception finally propagates to the caller. This does NOT change what
+# happens once every attempt is exhausted -- this function's existing
+# contract (raises, never swallows) is unchanged; callers
+# (stock_universe_update_listener.py's _resolve_nse_side) already wrap
+# this call in their own try/except.
 
 from tradingview_screener import stocks, col
+
+from core.retry import call_with_retry, MAX_ATTEMPTS
 
 # Maps TradingView's own field name -> our stock_universe column name.
 FIELD_MAP = {
@@ -86,30 +99,41 @@ def fetch_fundamentals_tradingview(symbol, exchange):
     yfinance_client.fetch_fundamentals's own contract -- callers can
     treat "found nothing" the same way regardless of which tier answered.
 
-    Raises whatever tradingview_screener/network exception occurs --
-    same design as yfinance_client.fetch_fundamentals: callers catch and
-    log per-stock, this function does not swallow errors itself.
+    Raises whatever tradingview_screener/network exception occurs, AFTER
+    retrying a couple of times first (see core/retry.py and this file's
+    own header comment) -- same design as yfinance_client.fetch_fundamentals:
+    callers catch and log per-stock, this function does not swallow
+    errors itself once retries are exhausted.
     """
     tv_exchange = "BSE" if (exchange or "").upper().startswith("BSE") else "NSE"
 
     tv_columns = list(FIELD_MAP.keys())
-    # Confirmed real bug on first live test: bare Query() defaults to
-    # scanning ONLY the 'america' market (per the library's own
-    # documented example JSON payload, 'markets': ['america']) --
-    # filtering by exchange == 'NSE' alone against that default scope
-    # matches nothing at all, regardless of symbol, since NSE was never
-    # even in the scanned market to begin with. stocks('india') scopes
-    # the query to the right market first, matching the library's own
-    # documented pattern (stocks('italy'), etc.) for exactly this reason.
-    count, df = (
-        stocks("india")
-        .select(*tv_columns)
-        .where(
-            col("name") == symbol,
-            col("exchange") == tv_exchange,
+
+    def _run_query():
+        # Confirmed real bug on first live test: bare Query() defaults to
+        # scanning ONLY the 'america' market (per the library's own
+        # documented example JSON payload, 'markets': ['america']) --
+        # filtering by exchange == 'NSE' alone against that default scope
+        # matches nothing at all, regardless of symbol, since NSE was never
+        # even in the scanned market to begin with. stocks('india') scopes
+        # the query to the right market first, matching the library's own
+        # documented pattern (stocks('italy'), etc.) for exactly this reason.
+        return (
+            stocks("india")
+            .select(*tv_columns)
+            .where(
+                col("name") == symbol,
+                col("exchange") == tv_exchange,
+            )
+            .limit(1)
+            .get_scanner_data()
         )
-        .limit(1)
-        .get_scanner_data()
+
+    count, df = call_with_retry(
+        _run_query,
+        on_retry=lambda attempt, e: print(
+            f"    [retry {attempt}/{MAX_ATTEMPTS}] TradingView {symbol}/{tv_exchange} -- {e}"
+        ),
     )
 
     if count == 0 or df.empty:
