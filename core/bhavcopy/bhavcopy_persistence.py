@@ -66,6 +66,30 @@ def is_already_persisted(conn, trade_date, exchange_code):
         return cur.fetchone() is not None
 
 
+def get_latest_success_date(conn, exchange_code):
+    """
+    Returns the most recent trade_date with a SUCCESS row in
+    bhav_copy_metadata for this exchange, or None if this exchange has
+    no successfully-processed date at all yet (e.g. a brand-new database,
+    before the historical backfill loader -- bhav_copy_with_corporate_
+    action_loader.py -- has ever been run for it).
+
+    ADDED 2026-08-20 for bhav_copy_schedule_listener.py's continuity
+    check: the scheduler needs to know exactly where NSE/BSE's
+    successfully-integrated history currently ends, per exchange, before
+    it can decide whether the next date it's about to fetch would leave
+    a gap. See that listener's own comments for the full reasoning --
+    this is a plain read-only lookup, no other caller needed it before.
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(trade_date) FROM bhav_copy_metadata WHERE exchange = %s AND upload_status = 'SUCCESS'",
+            (exchange_code,),
+        )
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None
+
+
 INSERT_COLUMNS = [
     "symbol", "exchange", "series", "open", "high", "low", "close", "last",
     "prev_close", "tot_trd_qty", "tot_trd_val", "trade_date", "total_trades",

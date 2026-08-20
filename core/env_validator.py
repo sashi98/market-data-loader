@@ -17,6 +17,21 @@ REQUIRED_KEYS = [
     "POSTGRES_PASSWORD",
     "TMT_APP_BASE_URL",
     "MARKET_DATA_LOADER_DOWNLOAD_DIR",
+    # Added 2026-08-19 for bhav_copy_schedule_listener.py -- the ONLY
+    # listener in this repo that authenticates against tmt's REST API
+    # (POST /api/data-integration/bhav-copy/{exchange}/{date} requires
+    # ROLE_ADMIN + a JWT, see tmt's SecurityConfig.java). Listed here
+    # (not just read ad hoc by that one script) so a missing/blank value
+    # fails fast at startup with a clear message, same as every other
+    # required key -- consistent with this module's own "fail fast, print
+    # exactly what's missing" design, rather than that one listener
+    # discovering it's missing credentials only when it tries to log in.
+    # Every OTHER listener still gets these back in the resolved dict too
+    # (harmless -- same as MARKET_DATA_LOADER_DOWNLOAD_DIR already being
+    # required even for listeners that don't use it) since this file is
+    # shared across all of them.
+    "TMT_ADMIN_USER_ID",
+    "TMT_ADMIN_PASSWORD",
 ]
 
 # market-data-loader/core/env_validator.py -> market-data-loader/ -> app/ -> track-my-trade/
