@@ -226,6 +226,26 @@ EXCHANGES = ["NSE", "BSE"]
 # -- see this file's own header, "NEW VARIABLES".
 DEFAULT_START_DATE = date(2024, 1, 1)
 
+# STOCK UNIVERSE READINESS GATE (2026-09-11) -- confirmed with
+# Sashikant: before this scheduler ever enters STEP 1's AMH/BMH cycle
+# logic, it must first confirm the stock universe has been fully
+# enriched at least once in this environment. stock_universe_metadata
+# gets one row per (data_source, segment) integration attempt, written
+# by the separate stock_universe_update_listener.py process (see this
+# file's own header -- no coupling exists between the two processes
+# otherwise, so on a brand-new environment this scheduler could
+# otherwise race ahead of stock universe enrichment and run STEP 2
+# onward against an empty/partial universe). Checked exactly ONCE at
+# process startup (not re-checked every cycle) -- see
+# _wait_for_stock_universe_ready().
+REQUIRED_STOCK_UNIVERSE_SOURCES = [
+    ("nse_data", "CASH"),
+    ("nse_sme_data", "CASH"),
+    ("bse_data", "CASH"),
+    ("bse_sme_data", "CASH"),
+    ("nse_fno_data", "FO"),
+]
+
 # indicator_id -> its own runner module's run(conn, indicator_id,
 # start_date, end_date) function -- STEP 8's per-indicator dispatch.
 RUNNERS = {
@@ -694,6 +714,66 @@ def check_and_process(env_values):
     return True
 
 
+def _stock_universe_ready(env_values):
+    """
+    True if every required (data_source, segment) combination in
+    REQUIRED_STOCK_UNIVERSE_SOURCES has at least one row with
+    status = 'success' in stock_universe_metadata. Returns False (never
+    raises) on a DB error -- treated the same as "not ready yet" so a
+    transient connection failure just gets retried on the next poll,
+    same degrade-and-continue convention this file already uses
+    elsewhere (see _bhav_copy_freshness_per_exchange's own caller in
+    check_and_process()).
+    """
+    try:
+        conn = get_connection(env_values)
+        try:
+            missing = []
+            with conn.cursor() as cur:
+                for data_source, segment in REQUIRED_STOCK_UNIVERSE_SOURCES:
+                    cur.execute(
+                        "SELECT 1 FROM stock_universe_metadata WHERE data_source = %s AND segment = %s "
+                        "AND status = 'success' LIMIT 1",
+                        (data_source, segment),
+                    )
+                    if cur.fetchone() is None:
+                        missing.append(f"{data_source}/{segment}")
+        finally:
+            conn.close()
+    except DbConnectionError as e:
+        logger.warning(f"  [WARN] Could not check stock_universe_metadata readiness: {e} -- treating as not ready.")
+        return False
+
+    if missing:
+        logger.info(f"  Stock universe not ready yet -- still waiting on: {', '.join(missing)}.")
+        return False
+    return True
+
+
+def _wait_for_stock_universe_ready(env_values):
+    """
+    STEP 0 -- blocks, polling every CHECK_INTERVAL_SECONDS, until the
+    stock universe has been fully enriched at least once in this
+    environment (see REQUIRED_STOCK_UNIVERSE_SOURCES above for what
+    "fully enriched" means). Called exactly ONCE from run(), right after
+    env validation succeeds and before either the --once path or the
+    main AMH/BMH loop -- so both paths are gated the same way, but a
+    cycle already in progress is never interrupted by this check.
+    Polls indefinitely, no timeout -- same pattern as run()'s own
+    window-wait loop; there's no sensible timeout for "how long can
+    initial stock universe enrichment take."
+    """
+    if _stock_universe_ready(env_values):
+        logger.info("Stock universe readiness check passed -- all required sources present. Proceeding.")
+        return
+
+    logger.info(f"Stock universe not yet fully enriched -- waiting before starting the scheduler "
+                f"(re-checking every {CHECK_INTERVAL_SECONDS // 60} min)...")
+    while not _stock_universe_ready(env_values):
+        time.sleep(CHECK_INTERVAL_SECONDS)
+    logger.info("Stock universe readiness check passed -- all required sources present. Proceeding.")
+
+
 def _log_cycle_idle_message(cycle_id, now, sleep_seconds):
     """
     The one line an operator glancing at the log actually needs once
@@ -744,6 +824,8 @@ def run():
         except EnvValidationError as e:
             logger.error(f"[FAILED] {e}")
             sys.exit(1)
+
+        _wait_for_stock_universe_ready(env_values)
 
         if args.once:
             logger.info("Bhavcopy scheduler -- running a single check-and-process cycle (--once), then exiting.")
