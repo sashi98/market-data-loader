@@ -42,7 +42,7 @@ pip install -r requirements.txt
 ## Usage
 
 ```
-python main.py
+python loaders_main.py
 ```
 
 This lists all available loaders and prompts for a choice:
@@ -107,7 +107,7 @@ given date.
 
 ```
 market-data-loader/
-  main.py                 -- lists loaders, prompts, clears screen, dispatches
+  loaders_main.py                 -- lists loaders, prompts, clears screen, dispatches
   requirements.txt
   core/
     env_validator.py       -- loads + validates ../../config/.env
@@ -124,7 +124,7 @@ market-data-loader/
 ```
 
 To add a new loader: create `loaders/<name>_loader.py` exposing a `run()`
-function, then register it in the `LOADERS` list in `main.py`.
+function, then register it in the `LOADERS` list in `loaders_main.py`.
 
 ## Conventions
 

@@ -41,6 +41,8 @@ import time
 
 from psycopg2.extras import execute_values
 
+from core.date_format import fmt_date
+
 
 class BhavCopyPersistenceError(Exception):
     """Raised when NSE/BSE persistence fails. Caller should roll back the transaction."""
@@ -171,7 +173,7 @@ def persist_nse(conn, parsed_rows, trade_date, csv_file_path, start_time_ms):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        raise BhavCopyPersistenceError(f"NSE persistence failed for {trade_date}: {e}")
+        raise BhavCopyPersistenceError(f"NSE persistence failed for {fmt_date(trade_date)}: {e}")
 
 
 def persist_bse(conn, parsed_rows, trade_date, csv_file_path, start_time_ms):
@@ -211,4 +213,23 @@ def persist_bse(conn, parsed_rows, trade_date, csv_file_path, start_time_ms):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        raise BhavCopyPersistenceError(f"BSE persistence failed for {trade_date}: {e}")
+        raise BhavCopyPersistenceError(f"BSE persistence failed for {fmt_date(trade_date)}: {e}")
+
+
+def get_latest_success_date_overall(conn):
+    """
+    Same as get_latest_success_date() above, but across BOTH exchanges
+    combined rather than one at a time -- ADDED 2026-08-30 for the
+    scheduler redesign: STEP 2 (Daily Bhav Copy Runner) now determines
+    ONE overall date range per cycle (not a separate range per
+    exchange), then processes NSE + BSE for every date in that range
+    (date-major, not exchange-major -- see
+    listeners/price_actions/bhavcopy_listener.py's own STEP 2 docstring).
+    Returns None if bhav_copy_metadata has no SUCCESS row at all yet
+    (a genuinely empty table) -- the caller treats that as "start from
+    01-01-2024".
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(trade_date) FROM bhav_copy_metadata WHERE upload_status = 'SUCCESS'")
+        row = cur.fetchone()
+        return row[0] if row and row[0] is not None else None

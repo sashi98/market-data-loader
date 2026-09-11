@@ -26,6 +26,8 @@ import io
 
 import requests
 
+from core.date_format import fmt_date
+
 CONNECT_TIMEOUT_SECONDS = 30
 READ_TIMEOUT_SECONDS = 60
 
@@ -110,27 +112,27 @@ def download_nse_corporate_actions(from_date, to_date):
         )
     except requests.exceptions.RequestException as e:
         raise CorporateActionsDownloadError(
-            f"Request failed for NSE corporate actions {from_date} to {to_date}: {e}"
+            f"Request failed for NSE corporate actions {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
     finally:
         session.close()
 
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
-            f"HTTP {response.status_code} received from NSE corporate actions API for {from_date} to {to_date}."
+            f"HTTP {response.status_code} received from NSE corporate actions API for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     try:
         body = response.json()
     except ValueError as e:
         raise CorporateActionsDownloadError(
-            f"NSE corporate actions API did not return valid JSON for {from_date} to {to_date}: {e}"
+            f"NSE corporate actions API did not return valid JSON for {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
 
     if not isinstance(body, list):
         raise CorporateActionsDownloadError(
             f"NSE corporate actions API returned an unexpected body shape (expected a JSON list) "
-            f"for {from_date} to {to_date}."
+            f"for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     return body
@@ -162,19 +164,19 @@ def download_bse_corporate_actions(from_date, to_date):
         )
     except requests.exceptions.RequestException as e:
         raise CorporateActionsDownloadError(
-            f"Request failed for BSE corporate actions {from_date} to {to_date}: {e}"
+            f"Request failed for BSE corporate actions {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
 
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
-            f"HTTP {response.status_code} received from BSE corporate actions API for {from_date} to {to_date}."
+            f"HTTP {response.status_code} received from BSE corporate actions API for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     try:
         body = response.json()
     except ValueError as e:
         raise CorporateActionsDownloadError(
-            f"BSE corporate actions API did not return valid JSON for {from_date} to {to_date}: {e}"
+            f"BSE corporate actions API did not return valid JSON for {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
 
     # BSE's real response shape is unconfirmed -- normalize both a bare
@@ -186,7 +188,7 @@ def download_bse_corporate_actions(from_date, to_date):
 
     if not isinstance(body, list):
         raise CorporateActionsDownloadError(
-            f"BSE corporate actions API returned an unexpected body shape for {from_date} to {to_date}."
+            f"BSE corporate actions API returned an unexpected body shape for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     return body
@@ -219,7 +221,7 @@ def _parse_csv_response_text(response_content, exchange, from_date, to_date):
     if stripped.startswith("<") or stripped.startswith("{"):
         raise CorporateActionsDownloadError(
             f"{exchange} corporate actions CSV endpoint returned a non-CSV body "
-            f"for {from_date} to {to_date} (first 200 chars: {stripped[:200]!r})."
+            f"for {fmt_date(from_date)} to {fmt_date(to_date)} (first 200 chars: {stripped[:200]!r})."
         )
     return list(csv.DictReader(io.StringIO(text)))
 
@@ -266,7 +268,7 @@ def download_nse_corporate_actions_csv(from_date, to_date):
         )
     except requests.exceptions.RequestException as e:
         raise CorporateActionsDownloadError(
-            f"Request failed for NSE corporate actions CSV {from_date} to {to_date}: {e}"
+            f"Request failed for NSE corporate actions CSV {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
     finally:
         session.close()
@@ -274,7 +276,7 @@ def download_nse_corporate_actions_csv(from_date, to_date):
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from NSE corporate actions CSV endpoint "
-            f"for {from_date} to {to_date}."
+            f"for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     return _parse_csv_response_text(response.content, "NSE", from_date, to_date)
@@ -327,13 +329,13 @@ def download_bse_corporate_actions_csv(from_date, to_date):
         )
     except requests.exceptions.RequestException as e:
         raise CorporateActionsDownloadError(
-            f"Request failed for BSE corporate actions CSV {from_date} to {to_date}: {e}"
+            f"Request failed for BSE corporate actions CSV {fmt_date(from_date)} to {fmt_date(to_date)}: {e}"
         )
 
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from BSE corporate actions CSV endpoint "
-            f"for {from_date} to {to_date}."
+            f"for {fmt_date(from_date)} to {fmt_date(to_date)}."
         )
 
     return _parse_csv_response_text(response.content, "BSE", from_date, to_date)

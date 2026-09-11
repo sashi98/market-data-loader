@@ -159,54 +159,44 @@ def is_gap(calendar_index, earlier_date, later_date, threshold=GAP_THRESHOLD_SES
     return missed >= threshold
 
 
-RECENT_ELIGIBLE_CLOSES_SQL = f"""
-    WITH ranked AS (
-        SELECT bc.isin, bc.exchange, bc.series, bc.symbol, bc.trade_date,
-               bc.close * COALESCE(adj.factor, 1) AS close,
-               bc.prev_close * COALESCE(adj.factor, 1) AS prev_close,
-               {{tiebreak_rank}}
-          FROM bhav_copy bc
-          {{adjustment_join}}
-         WHERE bc.isin = %(isin)s AND bc.exchange = %(exchange)s
-           AND bc.trade_date <= %(as_of_date)s
-           AND {{eligibility}}
-           AND {MIN_LIQUIDITY_FILTER_SQL}
-    )
-    SELECT isin, exchange, series, symbol, trade_date, close, prev_close
-      FROM ranked
-     WHERE continuity_rank = 1
+# REPOINTED 2026-08-24 (security_id migration, see
+# claude/bhav-copy-adjusted-clean-price-series-design-2026-08-23.md in
+# the project docs) -- this used to join raw bhav_copy against
+# ADJUSTMENT_FACTOR_JOIN_SQL and re-apply ELIGIBLE_SERIES_EXISTS_SQL /
+# TIEBREAK_RANK_SQL at read time, keyed by isin. All of that is now
+# baked into bhav_copy_adjusted once, upstream, by
+# loaders/bhav_copy_adjustment_loader.py -- this is now a plain read,
+# keyed by security_id so a gap-reseed window can span an isin change
+# (e.g. MWL's SME-to-mainboard migration) without losing history.
+RECENT_ELIGIBLE_CLOSES_SQL = """
+    SELECT security_id, source_isin AS isin, exchange, series, symbol, trade_date, close, prev_close
+      FROM bhav_copy_adjusted
+     WHERE security_id = %(security_id)s AND exchange = %(exchange)s
+       AND trade_date <= %(as_of_date)s
      ORDER BY trade_date DESC
      LIMIT %(limit)s
 """
 
 
-def fetch_recent_eligible_closes(conn, isin, exchange, as_of_date, limit):
+def fetch_recent_eligible_closes(conn, security_id, exchange, as_of_date, limit):
     """
-    Last `limit` eligible, deduped, tiebroken closes for one isin+
-    exchange up to and including as_of_date, oldest first -- used by
-    the incremental path's gap-reseed: when a stock resumes after a
-    real suspension, its Wilder average is restarted from scratch using
-    this window rather than stepped from a now-stale prior average.
+    Last `limit` closes for one security_id+exchange up to and
+    including as_of_date, oldest first -- used by the incremental
+    path's gap-reseed: when a stock resumes after a real suspension,
+    its Wilder average is restarted from scratch using this window
+    rather than stepped from a now-stale prior average.
 
-    Imports are local to avoid a circular import (adjustment.py and
-    rsi_math don't depend on this module, but rsi_persistence.py does,
-    and this function needs the same adjustment-factor join that module
-    uses).
+    No adjustment join or eligibility/tiebreak filtering needed here
+    anymore -- bhav_copy_adjusted is already one clean, continuous,
+    deduped row per (security_id, exchange, trade_date).
     """
-    from core.corporate_actions.adjustment import ADJUSTMENT_FACTOR_JOIN_SQL
-
-    query = RECENT_ELIGIBLE_CLOSES_SQL.format(
-        tiebreak_rank=TIEBREAK_RANK_SQL,
-        adjustment_join=ADJUSTMENT_FACTOR_JOIN_SQL,
-        eligibility=ELIGIBLE_SERIES_EXISTS_SQL,
-    )
     try:
         df = pd.read_sql(
-            query, conn,
-            params={"isin": isin, "exchange": exchange, "as_of_date": as_of_date, "limit": limit},
+            RECENT_ELIGIBLE_CLOSES_SQL, conn,
+            params={"security_id": security_id, "exchange": exchange, "as_of_date": as_of_date, "limit": limit},
         )
     except Exception as e:
         raise RsiContinuityError(
-            f"Failed to fetch recent eligible closes for isin={isin} exchange={exchange}: {e}"
+            f"Failed to fetch recent eligible closes for security_id={security_id} exchange={exchange}: {e}"
         )
     return df.sort_values("trade_date").reset_index(drop=True)

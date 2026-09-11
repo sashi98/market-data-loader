@@ -64,6 +64,7 @@
 import csv
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from core.date_format import fmt_date
 
 # -- v2 (UDiFF) header names --
 HEADER_V2_TRADE_DATE = "TradDt"
@@ -382,9 +383,9 @@ def parse_bhavcopy_csv(file_path, expected_trade_date):
     # -- Validate trade date matches expected_trade_date --
     mismatched = [r for r in parsed_rows if r["tradeDate"] != expected_trade_date]
     if mismatched:
-        actual_dates = {str(r["tradeDate"]) for r in mismatched}
+        actual_dates = {fmt_date(r["tradeDate"]) for r in mismatched}
         raise BhavCopyParseError(
-            f"Trade date mismatch in {file_path}: expected {expected_trade_date}, "
+            f"Trade date mismatch in {file_path}: expected {fmt_date(expected_trade_date)}, "
             f"found {actual_dates}"
         )
 

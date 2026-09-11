@@ -11,10 +11,35 @@
 # independent transaction.
 
 from urllib.parse import urlparse
+import warnings
 
 import psycopg2
 
 JDBC_PREFIX = "jdbc:"
+
+# Every pd.read_sql(query, conn, ...) call across this project (rollup,
+# RSI, MA, adjusted-series persistence, etc.) is handed a raw psycopg2
+# connection from get_connection() below rather than a SQLAlchemy engine --
+# deliberately, since this project only ever talks to one Postgres database
+# directly and doesn't otherwise need SQLAlchemy as a dependency. pandas
+# reacts to that on every single read_sql() call with:
+#   UserWarning: pandas only supports SQLAlchemy connectable (engine/
+#   connection) or database string URI or sqlite3 DBAPI2 connection...
+# which is harmless (psycopg2 is a fully-supported DBAPI2 connection) but,
+# left at Python's default per-call-site "default" filter, floods any log
+# with dozens of near-identical copies -- one per read_sql() call across
+# every module, every run. Registered here (module-scope, so it fires once
+# at first import of this shared connection helper, before any caller can
+# reach read_sql()) with action="once": Python prints the FIRST occurrence
+# of this exact warning once per process and silently drops every repeat
+# after that, regardless of which file/line triggers it -- so the signal
+# ("you're on a raw DBAPI2 connection, that's fine, here's why pandas
+# mentions it") survives once per run without drowning out everything else.
+warnings.filterwarnings(
+    "once",
+    message="pandas only supports SQLAlchemy connectable",
+    category=UserWarning,
+)
 
 
 class DbConnectionError(Exception):

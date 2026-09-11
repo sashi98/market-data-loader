@@ -21,6 +21,8 @@ from datetime import date
 
 import requests
 
+from core.date_format import fmt_date
+
 CONNECT_TIMEOUT_SECONDS = 30
 READ_TIMEOUT_SECONDS = 60
 
@@ -180,17 +182,17 @@ def download_bhavcopy(exchange, trade_date, download_dir):
             timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
         )
     except requests.exceptions.RequestException as e:
-        raise BhavCopyDownloadError(f"Request failed for {exchange} {trade_date}: {e}")
+        raise BhavCopyDownloadError(f"Request failed for {exchange} {fmt_date(trade_date)}: {e}")
 
     if response.status_code == 404:
         raise BhavCopyNotFoundError(
-            f"No BhavCopy file found for {exchange} {trade_date} (HTTP 404). "
+            f"No BhavCopy file found for {exchange} {fmt_date(trade_date)} (HTTP 404). "
             f"Likely a holiday/weekend or not yet published. URL: {download_url}"
         )
 
     if response.status_code != 200:
         raise BhavCopyDownloadError(
-            f"HTTP {response.status_code} received from {exchange} for {trade_date}. URL: {download_url}"
+            f"HTTP {response.status_code} received from {exchange} for {fmt_date(trade_date)}. URL: {download_url}"
         )
 
     # -- HTML-body check -- BSE (confirmed) sometimes returns its own
@@ -203,7 +205,7 @@ def download_bhavcopy(exchange, trade_date, download_dir):
     content_start = response.content[:200].lstrip().lower()
     if content_start.startswith(b"<!doctype") or content_start.startswith(b"<html"):
         raise BhavCopyNotFoundError(
-            f"No BhavCopy file found for {exchange} {trade_date} (HTTP 200 but HTML page, "
+            f"No BhavCopy file found for {exchange} {fmt_date(trade_date)} (HTTP 200 but HTML page, "
             f"not a CSV/ZIP -- likely the exchange's own \"not found\" page returned with a "
             f"200 status instead of 404). URL: {download_url}"
         )
@@ -216,12 +218,12 @@ def download_bhavcopy(exchange, trade_date, download_dir):
                 csv_entries = [name for name in zf.namelist() if name.lower().endswith(".csv")]
                 if not csv_entries:
                     raise BhavCopyDownloadError(
-                        f"No CSV file found inside {exchange} ZIP archive for {trade_date}. URL: {download_url}"
+                        f"No CSV file found inside {exchange} ZIP archive for {fmt_date(trade_date)}. URL: {download_url}"
                     )
                 with zf.open(csv_entries[0]) as csv_in, open(output_path, "wb") as csv_out:
                     csv_out.write(csv_in.read())
         except zipfile.BadZipFile as e:
-            raise BhavCopyDownloadError(f"Invalid ZIP received for {exchange} {trade_date}: {e}")
+            raise BhavCopyDownloadError(f"Invalid ZIP received for {exchange} {fmt_date(trade_date)}: {e}")
     else:
         # Current-format BSE -- direct CSV, write as-is.
         with open(output_path, "wb") as f:

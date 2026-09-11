@@ -12,6 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.bhavcopy.bhavcopy_parser import parse_bhavcopy_csv, BhavCopyParseError
+from core.date_format import fmt_date
 
 DOWNLOAD_DIR = Path("D:/MyProjectsWorkSpace/MY_DEV/track-my-trade/data/all")
 
@@ -19,7 +20,7 @@ DOWNLOAD_DIR = Path("D:/MyProjectsWorkSpace/MY_DEV/track-my-trade/data/all")
 def check_file(file_name, expected_date):
     file_path = DOWNLOAD_DIR / file_name
     print(f"\n{'=' * 60}")
-    print(f"  {file_name}  (expected trade date: {expected_date})")
+    print(f"  {file_name}  (expected trade date: {fmt_date(expected_date)})")
     print("=" * 60)
     try:
         rows = parse_bhavcopy_csv(str(file_path), expected_date)

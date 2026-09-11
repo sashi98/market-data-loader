@@ -52,6 +52,23 @@ from core.rsi.rsi_continuity import is_gap
 
 
 def compute_rsi14_for_isin(df_isin, calendar_index=None):
+    """
+    REPOINTED 2026-08-24 (security_id migration) -- name kept as-is to
+    avoid churn on the 3 historical one-off repair/diagnostic scripts
+    under tests/ that still call it directly against raw bhav_copy
+    (tests/repair_availfc_rsi_WRITE.py, tests/repair_split_face_values_
+    WRITE.py, tests/diagnose_availfc_rsi_manual.py). The function
+    itself doesn't care what the grouping column represents -- df_isin
+    just needs close/prev_close/trade_date, plus isin/exchange/series/
+    symbol for output.
+
+    security_id is echoed into the output DataFrame if the caller
+    supplied one (the new bulk/incremental path always does, via
+    bhav_copy_adjusted); otherwise falls back to isin as security_id --
+    correct by construction for any of the old isin-scoped callers,
+    since a security that never had an isin-lineage bridge has
+    security_id == isin anyway.
+    """
     df_isin = df_isin.reset_index(drop=True)
     close = df_isin["close"]
     prev_close = df_isin["prev_close"]
@@ -106,6 +123,7 @@ def compute_rsi14_for_isin(df_isin, calendar_index=None):
     ])
 
     return pd.DataFrame({
+        "security_id": df_isin["security_id"] if "security_id" in df_isin.columns else df_isin["isin"],
         "isin": df_isin["isin"],
         "exchange": df_isin["exchange"],
         "series": df_isin["series"],
@@ -121,28 +139,36 @@ def compute_rsi14_for_isin(df_isin, calendar_index=None):
 
 def compute_rsi14_all(df, calendar_index=None):
     """
-    df: DataFrame across ALL isins, already deduped to exactly one
-    eligible, tiebroken row per (isin, exchange, trade_date) by
-    rsi_persistence.fetch_bhav_copy_closes() -- columns [isin, exchange,
-    series, symbol, trade_date, close, prev_close].
+    df: DataFrame across ALL securities, already one clean, continuous
+    row per (security_id, exchange, trade_date) -- from
+    rsi_persistence.fetch_bhav_copy_closes() reading bhav_copy_adjusted
+    -- columns [security_id, isin, exchange, series, symbol,
+    trade_date, close, prev_close].
 
-    Grouped by (isin, exchange) ONLY -- a stock's RSI walk stays
-    continuous across a series relabel (e.g. EQ -> BE -> EQ) instead of
-    fragmenting into a separate, mostly-NULL series per series code,
-    which was the root cause of the MEIL RSI-corruption bug. SERIES and
-    SYMBOL are carried through as the winning row's own values (informational/audit trail
-    only, see rsi_continuity.py's tiebreak) -- no longer part of the
-    grouping key, since the eligibility filter + tiebreak upstream
-    already guarantee exactly one row per (isin, exchange, trade_date).
+    REPOINTED 2026-08-24 (security_id migration) -- grouped by
+    (security_id, exchange) now, not (isin, exchange). A stock's RSI
+    walk stays continuous across BOTH a series relabel (e.g. EQ -> BE
+    -> EQ, the original MEIL fix) AND an isin change (e.g. MWL's
+    SME-to-mainboard migration, bundled with a split on the same
+    ex_date) instead of fragmenting into a dead old-isin series plus a
+    freshly-reseeded new-isin series. ISIN/SERIES/SYMBOL are carried
+    through as the row's own source values (audit trail only, same
+    role they already played after 014.02.00) -- not part of the
+    grouping key.
+
+    Falls back to grouping by (isin, exchange) if the input lacks a
+    security_id column, for backward compatibility with old-style
+    isin-scoped callers (see compute_rsi14_for_isin's docstring).
 
     calendar_index: optional dict from core.rsi.rsi_continuity.
-    build_calendar_index(), threaded through to each isin's walk for
-    gap detection. None disables gap-reseed (equivalent to the old
+    build_calendar_index(), threaded through to each security's walk
+    for gap detection. None disables gap-reseed (equivalent to the old
     always-bridge behavior) -- callers should always pass a real index
     in production; None exists mainly for isolated unit testing.
     """
+    group_keys = ["security_id", "exchange"] if "security_id" in df.columns else ["isin", "exchange"]
     results = []
-    for (isin, exchange), group in df.groupby(["isin", "exchange"], sort=False):
+    for _key, group in df.groupby(group_keys, sort=False):
         group_sorted = group.sort_values("trade_date")
         results.append(compute_rsi14_for_isin(group_sorted, calendar_index=calendar_index))
     return pd.concat(results, ignore_index=True)

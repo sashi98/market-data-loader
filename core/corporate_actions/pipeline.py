@@ -23,13 +23,21 @@ from core.corporate_actions.corporate_actions_persistence import (
     resolve_bse_scrip_codes,
     CorporateActionsPersistenceError,
 )
-from core.rsi.rsi_calculator import compute_rsi14_for_isin
-from core.rsi.rsi_persistence import (
-    fetch_bhav_copy_closes_for_isin,
-    upsert_rsi14d_workbook,
-    RsiPersistenceError,
-)
-from core.rsi.rsi_continuity import fetch_trading_calendar, build_calendar_index, RsiContinuityError
+# RETIRED 2026-08-24 (Sashikant's call) -- this module used to end with
+# a targeted, isin-scoped RSI reprocess triggered the instant a
+# corporate action got newly MATCHED (see the git history for the old
+# imports/logic: compute_rsi14_for_isin, fetch_bhav_copy_closes_for_isin,
+# upsert_rsi14d_workbook, fetch_trading_calendar/build_calendar_index).
+# It read straight from raw bhav_copy, bypassing bhav_copy_adjusted
+# entirely, and was keyed by isin, not security_id -- so it would have
+# completely missed an isin-lineage-bridge case like MWL's. Retired in
+# favor of the new sequential pipeline (corporate action loader ->
+# bhav_copy adjustment loader -> W/M rollups -> RSI14D/W/M listeners,
+# see claude/bhav-copy-adjusted-clean-price-series-design-2026-08-23.md
+# in the project docs) -- that chain is now the ONLY path that
+# recomputes RSI after a corporate action. run_pipeline() below still
+# parses/persists/reconciles corporate actions exactly as before; it
+# just no longer reprocesses RSI itself afterward.
 
 
 class CorporateActionsPipelineError(Exception):
@@ -61,20 +69,18 @@ def run_pipeline(conn, nse_raw_rows, bse_raw_rows, nse_source_url, bse_source_ur
             resolve_bse_scrip_codes()'s docstring for why this is
             expected, not an error),
         touched_keys (set of (isin, action_type, ex_date)),
-        newly_matched_keys (list, same shape),
-        reprocess_results (list of
-            {"isin", "exchange", "written", "error"})
+        newly_matched_keys (list, same shape)
 
     Raises CorporateActionsPipelineError on a BSE scrip_code resolution
     failure, a parse failure, or a persistence/reconciliation failure --
     the whole batch is structurally broken at that point, nothing safe
     to salvage.
 
-    The targeted-RSI-reprocess step is deliberately SOFT per
-    isin+exchange instead of raising: one isin's rebuild failing (e.g.
-    a transient DB hiccup) is recorded in reprocess_results and the
-    rest of the newly-matched isins still get processed, rather than
-    aborting the whole run over one bad isin.
+    Does NOT reprocess RSI itself -- see the RETIRED note at the top of
+    this module. newly_matched_keys tells the caller which isins got a
+    newly-MATCHED action this run; downstream RSI recompute now happens
+    via the sequential pipeline (bhav_copy adjustment loader -> W/M
+    rollups -> RSI listeners), not from inside this function.
     """
     try:
         bse_resolved_rows, bse_unresolved_isin_count = resolve_bse_scrip_codes(conn, bse_raw_rows)
@@ -102,52 +108,11 @@ def run_pipeline(conn, nse_raw_rows, bse_raw_rows, nse_source_url, bse_source_ur
         conn.rollback()
         raise CorporateActionsPipelineError(f"Persistence/reconciliation failed: {e}")
 
-    reprocess_results = []
-    if newly_matched_keys:
-        newly_matched_isins = sorted({isin for isin, _action_type, _ex_date in newly_matched_keys})
-
-        # Fetched once for the whole reprocess batch, not per isin --
-        # same trading-session calendar rsi14d_loader.py and
-        # rsi_incremental.py use for gap detection (see
-        # core/rsi/rsi_continuity.py). A newly-matched corporate action
-        # doesn't imply anything about this isin's own suspension
-        # history, but the walk still needs to be gap-aware here for the
-        # same reason it is everywhere else -- this IS the full-history
-        # rebuild path for these isins, same as rsi14d_loader.py, just
-        # scoped to a handful of isins instead of the whole market.
-        try:
-            calendar_index = build_calendar_index(fetch_trading_calendar(conn))
-        except RsiContinuityError as e:
-            calendar_index = None
-            print(f"  [WARNING] Could not fetch trading calendar for gap-aware reprocess: {e} "
-                  f"-- continuing without gap detection for this batch.")
-
-        for isin in newly_matched_isins:
-            for exchange in ("NSE", "BSE"):
-                try:
-                    df = fetch_bhav_copy_closes_for_isin(conn, isin, exchange)
-                except RsiPersistenceError as e:
-                    reprocess_results.append({"isin": isin, "exchange": exchange, "written": 0, "error": str(e)})
-                    continue
-
-                if df.empty:
-                    continue  # isin doesn't trade on this exchange -- normal, not an error
-
-                # ONE walk per isin+exchange, not per series/symbol --
-                # df is already deduped to one eligible, tiebroken row
-                # per (isin, exchange, trade_date) by
-                # fetch_bhav_copy_closes_for_isin(), so grouping by
-                # series/symbol here would re-fragment the exact
-                # continuity this fix exists to preserve.
-                rsi_df = compute_rsi14_for_isin(df.sort_values("trade_date"), calendar_index=calendar_index)
-
-                try:
-                    written = upsert_rsi14d_workbook(conn, rsi_df)
-                except RsiPersistenceError as e:
-                    reprocess_results.append({"isin": isin, "exchange": exchange, "written": 0, "error": str(e)})
-                    continue
-
-                reprocess_results.append({"isin": isin, "exchange": exchange, "written": written, "error": None})
+    # RSI reprocess retired here -- see the module-level note above.
+    # newly_matched_keys is still returned below so a caller (e.g. a
+    # future step in the sequential pipeline) can see which isins got a
+    # newly-MATCHED action this run, but this function no longer acts
+    # on it itself.
 
     return {
         "nse_parsed_count": len(nse_parsed),
@@ -156,5 +121,4 @@ def run_pipeline(conn, nse_raw_rows, bse_raw_rows, nse_source_url, bse_source_ur
         "bse_unresolved_isin_count": bse_unresolved_isin_count,
         "touched_keys": touched_keys,
         "newly_matched_keys": newly_matched_keys,
-        "reprocess_results": reprocess_results,
     }

@@ -12,6 +12,45 @@
 # the full story: its writes, made from inside a Spring
 # @TransactionalEventListener(AFTER_COMMIT) callback, were silently
 # never committing at all).
+#
+# EXTENDED 2026-08-28 -- bhavcopy_scheduler_main.py needs a way to
+# ACTIVATE an indicator (flip indicators_registry to ACTIVE, its own
+# step 7) and listener/technicals/indicators_listener.py needs a way to
+# DEACTIVATE one once its thread cleanly finishes a cycle (not just on
+# failure, which record_failure() already handled).
+#
+# REVERTED 2026-08-29 -- 012.05.00 (START_TRADE_DATE/END_TRADE_DATE on
+# indicators_workbook_metadata) is gone -- Sashikant asked for it back
+# out after review found neither column was pulling its weight:
+# START_TRADE_DATE was written every activation but never read by
+# anything (listener/technicals/indicators_listener.py's own
+# catch_up_indicator() discarded it into `_start_trade_date`), and
+# END_TRADE_DATE only mattered for rsi14d's incremental walk -- and
+# even there, fetch_complete_trade_dates_after() below already bounds
+# that walk to whatever bhav_copy_metadata actually has, so the extra
+# ceiling wasn't adding anything a fresher read of that same table
+# wouldn't already give for free. activate_indicator() below is back to
+# a plain status flip; fetch_iwm_date_range() (the listener's read side
+# of those two columns) is deleted outright, not deprecated -- nothing
+# calls it anymore. See claude/bhavcopy-scheduler-and-indicator-listener-2026-08-28.md
+# (TrackMyTrade project) for the SQL that dropped the columns and the
+# 012.05.00 changelog file/include.
+#
+# EXTENDED 2026-09-06 (BLIND-UPSERT REDESIGN) -- added
+# fetch_iwm_freshness() below. bhavcopy_scheduler_main.py's STEP 7
+# ("Indicators Registry Update") used to activate every registered
+# indicator unconditionally every cycle (fetch_all_indicator_ids());
+# per Sashikant's own confirmed call, activation is now gated PURELY on
+# each indicator's own IWM freshness -- indicators_workbook_metadata.
+# latest_trade_date IS NULL (never completed a run) or behind
+# LATEST_TRADE_DATE. fetch_iwm_freshness() is the one query that answers
+# that for every registered indicator in a single round trip, so the
+# scheduler doesn't need to call fetch_iwm_cursor() (below) once per
+# indicator_id in a loop.
+
+
+from core.date_format import fmt_date
+
 
 class IndicatorsPersistenceError(Exception):
     """Raised when any Indicators Framework bookkeeping query/write fails."""
@@ -26,6 +65,61 @@ def fetch_active_indicators(conn):
             return [row[0] for row in cur.fetchall()]
     except Exception as e:
         raise IndicatorsPersistenceError(f"Failed to fetch active indicators: {e}")
+
+
+def fetch_all_indicator_ids(conn):
+    """
+    Returns every indicator_id registered in indicators_registry,
+    regardless of status. Superseded, for bhavcopy_scheduler_main.py's
+    own STEP 7 purposes, by fetch_iwm_freshness() below (which returns
+    the same roster PLUS each one's own IWM freshness in one query) --
+    kept here since other callers may still want just the bare roster.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT indicator_id FROM indicators_registry ORDER BY indicator_id")
+            return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        raise IndicatorsPersistenceError(f"Failed to fetch registered indicators: {e}")
+
+
+def fetch_iwm_freshness(conn):
+    """
+    Returns {indicator_id: latest_trade_date} for EVERY indicator_id
+    registered in indicators_registry, LEFT JOINed against
+    indicators_workbook_metadata (IWM) -- latest_trade_date is None for
+    an indicator that has never completed a run (a fresh NULL IWM
+    cursor). Every indicators_registry row has exactly one matching IWM
+    row by construction (012.02.00's changelog comment -- one row per
+    indicator_id, inserted at registration), so the LEFT JOIN is purely
+    defensive; a genuinely missing IWM row still comes back as None
+    here rather than raising, unlike fetch_iwm_cursor() below (which
+    treats a missing row as a hard drift-out-of-sync error) -- STEP 7
+    activation is better served by degrading a drifted row to "never
+    run" than by aborting the whole cycle's indicator activation over
+    one bad row.
+
+    This is bhavcopy_scheduler_main.py's STEP 7
+    ("Indicators Registry Update") sole basis for activation as of the
+    2026-09-06 blind-upsert redesign -- see that file's
+    _activate_indicators() for how the result is used: an indicator
+    activates iff its own value here is None or behind
+    LATEST_TRADE_DATE, with no reference to gap[] or any source table's
+    freshness at all.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.indicator_id, iwm.latest_trade_date
+                  FROM indicators_registry r
+                  LEFT JOIN indicators_workbook_metadata iwm ON iwm.indicator_id = r.indicator_id
+                 ORDER BY r.indicator_id
+                """
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
+    except Exception as e:
+        raise IndicatorsPersistenceError(f"Failed to fetch indicators_workbook_metadata freshness: {e}")
 
 
 def fetch_iwm_cursor(conn, indicator_id):
@@ -122,7 +216,7 @@ def record_success(conn, indicator_id, trade_date):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        raise IndicatorsPersistenceError(f"Failed to record success for {indicator_id}/{trade_date}: {e}")
+        raise IndicatorsPersistenceError(f"Failed to record success for {indicator_id}/{fmt_date(trade_date)}: {e}")
 
 
 def record_bootstrap(conn, indicator_id, trade_date):
@@ -162,4 +256,74 @@ def record_failure(conn, indicator_id, trade_date, error_message):
         conn.commit()
     except Exception as e:
         conn.rollback()
-        raise IndicatorsPersistenceError(f"Failed to record failure for {indicator_id}/{trade_date}: {e}")
+        raise IndicatorsPersistenceError(f"Failed to record failure for {indicator_id}/{fmt_date(trade_date)}: {e}")
+
+
+def activate_indicator(conn, indicator_id):
+    """
+    bhavcopy_scheduler_main.py's step 7 ("Indicators Registry Update")
+    for ONE indicator -- flips indicators_registry.status to ACTIVE.
+    A plain status flip is all step 7 does -- indicators_workbook_metadata
+    itself is only ever updated by record_success()/record_bootstrap()/
+    record_failure() above, once the indicator's own runner actually
+    completes (or fails) its recompute.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE indicators_registry SET status = 'ACTIVE' WHERE indicator_id = %s",
+                (indicator_id,),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise IndicatorsPersistenceError(f"Failed to activate indicator {indicator_id}: {e}")
+
+
+def deactivate_indicator(conn, indicator_id):
+    """
+    Flips indicators_registry.status back to DEACTIVE for indicator_id.
+    Called by bhavcopy_scheduler_main.py's STEP 8 once an activated
+    indicator's runner cleanly completes its cycle. Distinct from
+    record_failure()'s own DEACTIVE flip: that one also opens an
+    indicators_open_failures row; this one does not -- a clean
+    completion is not a failure.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE indicators_registry SET status = 'DEACTIVE' WHERE indicator_id = %s",
+                (indicator_id,),
+            )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise IndicatorsPersistenceError(f"Failed to deactivate indicator {indicator_id}: {e}")
+
+
+def fetch_complete_trade_dates_between(conn, start_date, end_date):
+    """
+    Same completeness rule as fetch_complete_trade_dates_after() above
+    (both NSE and BSE show upload_status='SUCCESS' in bhav_copy_metadata
+    for the date) but bounded on BOTH ends. NOTE: confirmed dead code as
+    of the 2026-09-06 review -- nothing in this codebase calls it
+    (kept, not deleted, in case a future incremental-window indicator
+    runner wants it; see claude/bhavcopy-scheduler-end-to-end-flow-2026-09-06.md,
+    TrackMyTrade project, for the correction this was originally
+    believed to be load-bearing for rsi14d's own catch-up walk).
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT trade_date FROM bhav_copy_metadata
+                 WHERE upload_status = 'SUCCESS' AND trade_date >= %s AND trade_date <= %s
+                 GROUP BY trade_date
+                HAVING COUNT(DISTINCT exchange) = 2
+                 ORDER BY trade_date ASC
+                """,
+                (start_date, end_date),
+            )
+            return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        raise IndicatorsPersistenceError(f"Failed to fetch complete trade dates between {fmt_date(start_date)} and {fmt_date(end_date)}: {e}")

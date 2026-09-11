@@ -135,6 +135,11 @@ from core.stock_universe.tradingview_client import fetch_fundamentals_tradingvie
 from core.stock_universe.nse_client import fetch_fundamentals_nse, NseExcluded
 from core.stock_universe.bse_client import fetch_fundamentals_bse, BseExcluded
 
+import logging
+
+logger = logging.getLogger("stock_universe_update_listener")
+from core.date_format import fmt_datetime
+
 # This is a much slower-moving signal than indicators_listener's bhav_copy
 # completion check -- these five uploads happen at most a few times a
 # day, not continuously. Used as a SAFETY-NET fallback timeout only now,
@@ -230,7 +235,7 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
             fields.update(nse_fields)
             source_notes.append(f"NSE:{nse_symbol}")
     except NseExcluded as e:
-        print(f"  [EXCLUDED] {isin_number} NSE-side (NSE={nse_symbol}) -- {e}")
+        logger.info(f"  [EXCLUDED] {isin_number} NSE-side (NSE={nse_symbol}) -- {e}")
         with results_lock:
             results["excluded"] += 1
         _record_audit(results, results_lock, isin_number, nse_exchange, "EXCLUDED", str(e))
@@ -260,7 +265,7 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
         # too, for a completely unrelated source's bug. Now: log and
         # keep going with fields as they stand -- same principle as the
         # BSE-side's own wrapper around ITS official-API tier.
-        print(f"  [yfinance tier failed] {isin_number} NSE-side (yf={yf_ticker}) -- {e}")
+        logger.error(f"  [yfinance tier failed] {isin_number} NSE-side (yf={yf_ticker}) -- {e}")
         yf_fields = {}
     if yf_fields:
         for k, v in yf_fields.items():
@@ -285,7 +290,7 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
             # Same isolation principle as the yfinance wrapper just
             # above -- a TradingView-side crash must not cost the
             # official-API/yfinance fields already gathered.
-            print(f"  [TradingView tier failed] {isin_number} NSE-side (NSE={nse_symbol}) -- {e}")
+            logger.error(f"  [TradingView tier failed] {isin_number} NSE-side (NSE={nse_symbol}) -- {e}")
             tv_fields = None
         if tv_fields:
             filled = []
@@ -334,14 +339,14 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
         if bse_index_value:
             fields.setdefault("index_list", [bse_index_value])
     except BseExcluded as e:
-        print(f"  [EXCLUDED] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
+        logger.info(f"  [EXCLUDED] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
         with results_lock:
             results["excluded"] += 1
         _record_audit(results, results_lock, isin_number, bse_exchange, "EXCLUDED", str(e))
         time.sleep(RATE_LIMIT_DELAY_SECONDS)
         return {}, True, []
     except Exception as e:
-        print(f"  [BSE tier failed] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
+        logger.error(f"  [BSE tier failed] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
     time.sleep(RATE_LIMIT_DELAY_SECONDS)
 
     yf_ticker = f"{bse_security_code}.BO"
@@ -357,7 +362,7 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
         # parse failure inside yfinance itself) was propagating
         # uncaught, discarding whatever the BSE official API tier had
         # already fetched. Confirmed real via a live production run.
-        print(f"  [yfinance tier failed] {isin_number} BSE-side (yf={yf_ticker}) -- {e}")
+        logger.error(f"  [yfinance tier failed] {isin_number} BSE-side (yf={yf_ticker}) -- {e}")
         yf_fields = {}
     if yf_fields:
         for k, v in yf_fields.items():
@@ -390,7 +395,7 @@ def _worker(env_values, work_queue, results_lock, results):
     try:
         conn = get_connection(env_values)
     except DbConnectionError as e:
-        print(f"  [worker] Failed to open a connection: {e}")
+        logger.error(f"  [worker] Failed to open a connection: {e}")
         return
 
     NSE_DOWNLOAD_FOLDER.mkdir(exist_ok=True)
@@ -419,7 +424,7 @@ def _worker(env_values, work_queue, results_lock, results):
                         if excluded:
                             pass  # already logged and counted inside _resolve_nse_side
                         elif not nse_side_fields:
-                            print(f"  [NO DATA] {isin_number} NSE-side (NSE={nse_symbol})")
+                            logger.info(f"  [NO DATA] {isin_number} NSE-side (NSE={nse_symbol})")
                             with results_lock:
                                 results["failed"] += 1
                             _record_audit(results, results_lock, isin_number, nse_exchange, "NO_DATA",
@@ -434,12 +439,12 @@ def _worker(env_values, work_queue, results_lock, results):
                             nse_side_fields_for_sharing = written_fields
 
                             for column, value, reason in dropped:
-                                print(f"  [FIELD DROPPED] {isin_number} NSE-side -- {column}={value!r} not written: {reason}")
+                                logger.info(f"  [FIELD DROPPED] {isin_number} NSE-side -- {column}={value!r} not written: {reason}")
                                 _record_audit(results, results_lock, isin_number, nse_exchange, "FIELD_DROPPED",
                                               f"{column}={value!r}: {reason}")
 
                             if not written_fields:
-                                print(f"  [NO DATA] {isin_number} NSE-side (NSE={nse_symbol}) -- "
+                                logger.info(f"  [NO DATA] {isin_number} NSE-side (NSE={nse_symbol}) -- "
                                       f"every fetched field was dropped by numeric sanitization")
                                 with results_lock:
                                     results["failed"] += 1
@@ -447,19 +452,19 @@ def _worker(env_values, work_queue, results_lock, results):
                                               "All fetched fields were dropped by numeric sanitization -- nothing written")
                             else:
                                 dropped_note = f", {len(dropped)} dropped" if dropped else ""
-                                print(f"  [OK] {isin_number} NSE-side -> {' + '.join(source_notes)} -- "
+                                logger.info(f"  [OK] {isin_number} NSE-side -> {' + '.join(source_notes)} -- "
                                       f"{len(written_fields)} field(s) written{dropped_note}: {written_fields}")
                                 with results_lock:
                                     results["enriched"] += 1
                     except StockUniversePersistenceError as e:
                         conn.rollback()
-                        print(f"  [FAILED] {isin_number} NSE-side -- DB write failed: {e}")
+                        logger.error(f"  [FAILED] {isin_number} NSE-side -- DB write failed: {e}")
                         with results_lock:
                             results["failed"] += 1
                         _record_audit(results, results_lock, isin_number, nse_exchange, "FAILED", f"DB write failed: {e}")
                     except Exception as e:
                         conn.rollback()
-                        print(f"  [FAILED] {isin_number} NSE-side -- error: {e}")
+                        logger.error(f"  [FAILED] {isin_number} NSE-side -- error: {e}")
                         with results_lock:
                             results["failed"] += 1
                         _record_audit(results, results_lock, isin_number, nse_exchange, "FAILED", str(e))
@@ -486,7 +491,7 @@ def _worker(env_values, work_queue, results_lock, results):
                                 source_notes.append(f"NSE-shared:{','.join(shared_from_nse)}")
 
                             if not bse_side_fields:
-                                print(f"  [NO DATA] {isin_number} BSE-side (BSE={bse_security_code})")
+                                logger.info(f"  [NO DATA] {isin_number} BSE-side (BSE={bse_security_code})")
                                 with results_lock:
                                     results["failed"] += 1
                                 _record_audit(results, results_lock, isin_number, bse_exchange, "NO_DATA",
@@ -500,12 +505,12 @@ def _worker(env_values, work_queue, results_lock, results):
                                 written_fields = {k: v for k, v in bse_side_fields.items() if k not in dropped_columns}
 
                                 for column, value, reason in dropped:
-                                    print(f"  [FIELD DROPPED] {isin_number} BSE-side -- {column}={value!r} not written: {reason}")
+                                    logger.info(f"  [FIELD DROPPED] {isin_number} BSE-side -- {column}={value!r} not written: {reason}")
                                     _record_audit(results, results_lock, isin_number, bse_exchange, "FIELD_DROPPED",
                                                   f"{column}={value!r}: {reason}")
 
                                 if not written_fields:
-                                    print(f"  [NO DATA] {isin_number} BSE-side (BSE={bse_security_code}) -- "
+                                    logger.info(f"  [NO DATA] {isin_number} BSE-side (BSE={bse_security_code}) -- "
                                           f"every fetched field was dropped by numeric sanitization")
                                     with results_lock:
                                         results["failed"] += 1
@@ -513,19 +518,19 @@ def _worker(env_values, work_queue, results_lock, results):
                                                   "All fetched fields were dropped by numeric sanitization -- nothing written")
                                 else:
                                     dropped_note = f", {len(dropped)} dropped" if dropped else ""
-                                    print(f"  [OK] {isin_number} BSE-side -> {' + '.join(source_notes)} -- "
+                                    logger.info(f"  [OK] {isin_number} BSE-side -> {' + '.join(source_notes)} -- "
                                           f"{len(written_fields)} field(s) written{dropped_note}: {written_fields}")
                                     with results_lock:
                                         results["enriched"] += 1
                     except StockUniversePersistenceError as e:
                         conn.rollback()
-                        print(f"  [FAILED] {isin_number} BSE-side -- DB write failed: {e}")
+                        logger.error(f"  [FAILED] {isin_number} BSE-side -- DB write failed: {e}")
                         with results_lock:
                             results["failed"] += 1
                         _record_audit(results, results_lock, isin_number, bse_exchange, "FAILED", f"DB write failed: {e}")
                     except Exception as e:
                         conn.rollback()
-                        print(f"  [FAILED] {isin_number} BSE-side -- error: {e}")
+                        logger.error(f"  [FAILED] {isin_number} BSE-side -- error: {e}")
                         with results_lock:
                             results["failed"] += 1
                         _record_audit(results, results_lock, isin_number, bse_exchange, "FAILED", str(e))
@@ -564,7 +569,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
             set_maintenance_running(conn, True)
             conn.close()
         except (DbConnectionError, StockUniversePersistenceError) as e:
-            print(f"  [FAILED] Could not set maintenance status -- aborting batch rather than running without the banner active: {e}")
+            logger.error(f"  [FAILED] Could not set maintenance status -- aborting batch rather than running without the banner active: {e}")
             return
 
     try:
@@ -576,7 +581,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
                 set_maintenance_running(conn, False)
                 conn.close()
             except (DbConnectionError, StockUniversePersistenceError) as e:
-                print(f"  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
+                logger.error(f"  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
                       f"the app may be stuck showing the maintenance banner to every user until this is fixed. {e}")
 
 
@@ -595,12 +600,12 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
         isin_map = fetch_isin_exchange_map(conn)
         conn.close()
     except (DbConnectionError, StockUniversePersistenceError) as e:
-        print(f"  [FAILED] Could not fetch isin/exchange map: {e}")
+        logger.error(f"  [FAILED] Could not fetch isin/exchange map: {e}")
         return
 
     isins = list(isin_map.items())
     if limit is not None:
-        print(f"  --limit {limit} given -- truncating {len(isins)} ISINs down to the first {limit} for this test run.")
+        logger.info(f"  --limit {limit} given -- truncating {len(isins)} ISINs down to the first {limit} for this test run.")
         isins = isins[:limit]
 
     total = len(isins)
@@ -609,7 +614,7 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
     # up to 3 on the NSE side (official API, yfinance,
     # TradingView-if-needed) -- an upper-bound estimate, not exact.
     estimated_minutes = round((total * 5 * RATE_LIMIT_DELAY_SECONDS) / WORKER_THREAD_COUNT / 60, 1)
-    print(f"  Enriching {total} ISINs using {WORKER_THREAD_COUNT} worker threads "
+    logger.info(f"  Enriching {total} ISINs using {WORKER_THREAD_COUNT} worker threads "
           f"({RATE_LIMIT_DELAY_SECONDS}s delay per request per thread, ~{estimated_minutes} min worst-case estimate)...")
 
     work_queue = Queue()
@@ -652,25 +657,25 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
 
     def _print_summary(persisted):
         tag = "" if persisted else " (NOT PERSISTED -- --limit test run)"
-        print("  " + "-" * 58)
-        print(f"  Batch complete -- status={status}{tag}")
-        print(f"    ISINs processed:  {total}")
-        print(f"    Started:          {started_at.isoformat()}")
-        print(f"    Completed:        {completed_at.isoformat()}")
-        print(f"    Duration:         {elapsed_minutes} min")
-        print(f"    Sides enriched:   {results['enriched']}")
-        print(f"    Sides excluded:   {results['excluded']} (NSE isDelisted + BSE IShow==0)")
-        print(f"    Sides failed:     {results['failed']}")
-        print(f"    Success rate:     {success_rate}% (of {attempted_sides} attempted sides, excludes excluded)")
+        logger.info("  " + "-" * 58)
+        logger.info(f"  Batch complete -- status={status}{tag}")
+        logger.info(f"    ISINs processed:  {total}")
+        logger.info(f"    Started:          {fmt_datetime(started_at)}")
+        logger.info(f"    Completed:        {fmt_datetime(completed_at)}")
+        logger.info(f"    Duration:         {elapsed_minutes} min")
+        logger.info(f"    Sides enriched:   {results['enriched']}")
+        logger.info(f"    Sides excluded:   {results['excluded']} (NSE isDelisted + BSE IShow==0)")
+        logger.info(f"    Sides failed:     {results['failed']}")
+        logger.info(f"    Success rate:     {success_rate}% (of {attempted_sides} attempted sides, excludes excluded)")
         if results["audit"]:
-            print(f"    Non-success detail ({len(results['audit'])} row(s)) -- also written to "
+            logger.info(f"    Non-success detail ({len(results['audit'])} row(s)) -- also written to "
                   f"stock_universe_enrichment_audit{'' if persisted else ', but NOT this time (--limit test run)'}:")
             for row in results["audit"]:
-                print(f"      [{row['outcome']}] {row['isin_number']} ({row['exchange']}) -- {row['reason']}")
-        print("  " + "-" * 58)
+                logger.info(f"      [{row['outcome']}] {row['isin_number']} ({row['exchange']}) -- {row['reason']}")
+        logger.info("  " + "-" * 58)
 
     if limit is not None:
-        print(f"  --limit was set -- NOT recording this run in stock_universe_enrichment_run, "
+        logger.info(f"  --limit was set -- NOT recording this run in stock_universe_enrichment_run, "
               f"so the persistent cursor stays untouched (a limited test run is not a real complete batch).")
         _print_summary(persisted=False)
         return
@@ -682,7 +687,7 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
             record_enrichment_audit_rows(conn, run_id, results["audit"])
         conn.close()
     except (DbConnectionError, StockUniversePersistenceError) as e:
-        print(f"  [FAILED] Batch finished but could not record the outcome: {e}")
+        logger.error(f"  [FAILED] Batch finished but could not record the outcome: {e}")
         return
 
     _print_summary(persisted=True)
@@ -708,10 +713,10 @@ def poll_once(env_values, limit=None, last_idle_state=None):
         cursor = fetch_last_processed_cursor(conn)
         conn.close()
     except (DbConnectionError, StockUniversePersistenceError) as e:
-        print("=" * 60)
-        print("  Stock Universe enrichment listener -- poll cycle starting")
-        print("=" * 60)
-        print(f"  [FAILED] Could not check metadata/cursor: {e}")
+        logger.info("=" * 60)
+        logger.info("  Stock Universe enrichment listener -- poll cycle starting")
+        logger.info("=" * 60)
+        logger.error(f"  [FAILED] Could not check metadata/cursor: {e}")
         if last_idle_state is not None:
             last_idle_state["key"] = None  # force a fresh banner next time an idle state recurs
         return
@@ -720,11 +725,11 @@ def poll_once(env_values, limit=None, last_idle_state=None):
         idle_key = ("not_ready",)
         if last_idle_state is not None and last_idle_state.get("key") == idle_key:
             return
-        print("=" * 60)
-        print("  Stock Universe enrichment listener -- poll cycle starting")
-        print("=" * 60)
-        print("  Not all 5 exchange uploads are currently SUCCESS -- nothing to do this cycle.")
-        print("  (Suppressing this message on subsequent cycles until the state changes.)")
+        logger.info("=" * 60)
+        logger.info("  Stock Universe enrichment listener -- poll cycle starting")
+        logger.info("=" * 60)
+        logger.info("  Not all 5 exchange uploads are currently SUCCESS -- nothing to do this cycle.")
+        logger.info("  (Suppressing this message on subsequent cycles until the state changes.)")
         if last_idle_state is not None:
             last_idle_state["key"] = idle_key
         return
@@ -734,11 +739,11 @@ def poll_once(env_values, limit=None, last_idle_state=None):
         idle_key = ("no_new_batch", max_metadata_id)
         if last_idle_state is not None and last_idle_state.get("key") == idle_key:
             return
-        print("=" * 60)
-        print("  Stock Universe enrichment listener -- poll cycle starting")
-        print("=" * 60)
-        print(f"  Already enriched through metadata id {cursor} -- no new batch since then.")
-        print("  (Suppressing this message on subsequent cycles until a new batch appears.)")
+        logger.info("=" * 60)
+        logger.info("  Stock Universe enrichment listener -- poll cycle starting")
+        logger.info("=" * 60)
+        logger.info(f"  Already enriched through metadata id {cursor} -- no new batch since then.")
+        logger.info("  (Suppressing this message on subsequent cycles until a new batch appears.)")
         if last_idle_state is not None:
             last_idle_state["key"] = idle_key
         return
@@ -749,14 +754,14 @@ def poll_once(env_values, limit=None, last_idle_state=None):
     if last_idle_state is not None:
         last_idle_state["key"] = None
 
-    print("=" * 60)
-    print("  Stock Universe enrichment listener -- poll cycle starting")
-    print("=" * 60)
-    print(f"  New complete batch detected (metadata id {max_metadata_id} > cursor {cursor}) -- starting enrichment.")
+    logger.info("=" * 60)
+    logger.info("  Stock Universe enrichment listener -- poll cycle starting")
+    logger.info("=" * 60)
+    logger.info(f"  New complete batch detected (metadata id {max_metadata_id} > cursor {cursor}) -- starting enrichment.")
     run_enrichment_batch(env_values, max_metadata_id, limit=limit)
 
-    print("  Poll cycle complete.")
-    print("=" * 60)
+    logger.info("  Poll cycle complete.")
+    logger.info("=" * 60)
 
 
 def _open_listen_connection(env_values):
@@ -782,7 +787,7 @@ def _open_listen_connection(env_values):
     try:
         conn = get_connection(env_values)
     except DbConnectionError as e:
-        print(f"[WARNING] Could not open the LISTEN connection ({e}) -- "
+        logger.warning(f"[WARNING] Could not open the LISTEN connection ({e}) -- "
               f"falling back to plain {POLL_INTERVAL_SECONDS}s polling for now.")
         return None
 
@@ -819,7 +824,7 @@ def _wait_for_notify_or_timeout(listen_conn, timeout_seconds):
 
 
 def run():
-    """Standard entry point -- also callable via main.py, matching every other loader under loaders/."""
+    """Standard entry point -- also callable via loaders_main.py, matching every other loader under loaders/."""
     parser = argparse.ArgumentParser(description="Stock Universe enrichment listener")
     parser.add_argument("--once", action="store_true",
                          help="Run a single poll cycle and exit, instead of looping forever. Useful for a first test run.")
@@ -831,15 +836,15 @@ def run():
         try:
             env_values = load_and_validate_env()
         except EnvValidationError as e:
-            print(f"[FAILED] {e}")
+            logger.error(f"[FAILED] {e}")
             sys.exit(1)
 
         if args.once:
-            print("Stock Universe enrichment listener -- running a single poll cycle (--once), then exiting.")
+            logger.info("Stock Universe enrichment listener -- running a single poll cycle (--once), then exiting.")
             poll_once(env_values, limit=args.limit)
             return
 
-        print(f"Stock Universe enrichment listener starting -- LISTEN/NOTIFY on '{LISTEN_CHANNEL}' for near-instant "
+        logger.info(f"Stock Universe enrichment listener starting -- LISTEN/NOTIFY on '{LISTEN_CHANNEL}' for near-instant "
               f"wakeup, {POLL_INTERVAL_SECONDS}s periodic fallback in case a NOTIFY is ever missed. Ctrl+C to stop.")
         last_idle_state = {}
         listen_conn = _open_listen_connection(env_values)
@@ -858,7 +863,7 @@ def run():
                         # LISTEN connection for next time, rather than
                         # either crashing the whole listener or silently
                         # running with a broken connection forever.
-                        print(f"  [WARNING] LISTEN connection failed ({e}) -- "
+                        logger.warning(f"  [WARNING] LISTEN connection failed ({e}) -- "
                               f"sleeping {POLL_INTERVAL_SECONDS}s and reconnecting.")
                         try:
                             listen_conn.close()
@@ -869,7 +874,7 @@ def run():
                 else:
                     time.sleep(POLL_INTERVAL_SECONDS)
         except KeyboardInterrupt:
-            print("\nShutting down -- any in-flight worker thread will finish its current isin's "
+            logger.info("\nShutting down -- any in-flight worker thread will finish its current isin's "
                   "update before exiting (each isin is its own commit, safe to interrupt between isins).")
         finally:
             if listen_conn is not None:

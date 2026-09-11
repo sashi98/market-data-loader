@@ -16,7 +16,12 @@ REQUIRED_KEYS = [
     "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "TMT_APP_BASE_URL",
-    "MARKET_DATA_LOADER_DOWNLOAD_DIR",
+    "BHAV_COPY_CSV_DOWNLOAD_DIR",
+    # RENAMED 2026-08-30 from MARKET_DATA_LOADER_DOWNLOAD_DIR -- same key,
+    # clearer name (this is specifically where bhav copy CSVs get
+    # downloaded to, not a general-purpose market-data-loader directory).
+    # Read by runners/price_actions/bhav_copy_d_unadjusted_price_runner.py.
+    #
     # Added 2026-08-19 for bhav_copy_schedule_listener.py -- the ONLY
     # listener in this repo that authenticates against tmt's REST API
     # (POST /api/data-integration/bhav-copy/{exchange}/{date} requires
@@ -27,7 +32,7 @@ REQUIRED_KEYS = [
     # exactly what's missing" design, rather than that one listener
     # discovering it's missing credentials only when it tries to log in.
     # Every OTHER listener still gets these back in the resolved dict too
-    # (harmless -- same as MARKET_DATA_LOADER_DOWNLOAD_DIR already being
+    # (harmless -- same as BHAV_COPY_CSV_DOWNLOAD_DIR already being
     # required even for listeners that don't use it) since this file is
     # shared across all of them.
     "TMT_ADMIN_USER_ID",

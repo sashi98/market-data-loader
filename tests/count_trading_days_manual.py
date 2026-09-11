@@ -1,6 +1,6 @@
 # tests/count_trading_days_manual.py
 #
-# One-off diagnostic -- NOT a registered loader, not wired into main.py,
+# One-off diagnostic -- NOT a registered loader, not wired into loaders_main.py,
 # not an automated test. Answers: "how many trading days, walking
 # backward from to_date, does it take to reach (or pass) target_date?" --
 # using the REAL holiday-aware logic in core/trading_calendar.py (same
@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.env_validator import load_and_validate_env, EnvValidationError
 from core.health_client import check_health, HealthCheckError
 from core.auth_client import authenticate, AuthError
+from core.date_format import fmt_date
 from core.holiday_client import get_holiday_dates_for_year, HolidayFetchError
 from core.trading_calendar import compute_default_to_date, SATURDAY, SUNDAY
 
@@ -49,7 +50,7 @@ def main():
         sys.exit(1)
 
     to_date = compute_default_to_date()
-    print(f"\nWalking backward from to_date={to_date} until reaching target_date={TARGET_DATE} ...\n")
+    print(f"\nWalking backward from to_date={fmt_date(to_date)} until reaching target_date={fmt_date(TARGET_DATE)} ...\n")
 
     current = to_date
     trading_days = 0
@@ -83,8 +84,8 @@ def main():
     calendar_days = (to_date - TARGET_DATE).days + 1
 
     print("=" * 50)
-    print(f"  to_date:              {to_date}")
-    print(f"  target_date:          {TARGET_DATE}")
+    print(f"  to_date:              {fmt_date(to_date)}")
+    print(f"  target_date:          {fmt_date(TARGET_DATE)}")
     print(f"  Total calendar days:  {calendar_days}")
     print(f"  Weekends excluded:    {weekend_count}")
     print(f"  Holidays excluded:    {holiday_count}")

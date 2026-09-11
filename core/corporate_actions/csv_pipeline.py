@@ -153,7 +153,8 @@ def process_corporate_actions_rows(conn, exchange, raw_rows, from_date, to_date)
 
     Returns run_pipeline()'s summary dict (see that function's
     docstring: nse_parsed_count, bse_parsed_count, unparsed_ratio_count,
-    touched_keys, newly_matched_keys, reprocess_results), plus:
+    touched_keys, newly_matched_keys -- RSI reprocess retired 2026-08-24,
+    see pipeline.py's module-level note), plus:
       - "unresolved_isin_count" -- rows dropped because no
         stock_universe match was found (symbol for NSE, scrip_code for
         BSE) -- normalized under one key regardless of exchange.

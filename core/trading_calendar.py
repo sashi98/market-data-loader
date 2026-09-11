@@ -8,6 +8,7 @@
 from datetime import datetime, timedelta
 
 from core.holiday_client import get_holiday_dates_for_year, HolidayFetchError
+from core.date_format import fmt_date
 
 SATURDAY = 5
 SUNDAY = 6
@@ -137,7 +138,7 @@ def compute_trading_date_range_between(from_date, to_date, tmt_app_base_url, jwt
     """
     if from_date > to_date:
         raise TradingCalendarError(
-            f"from_date ({from_date}) must not be after to_date ({to_date})."
+            f"from_date ({fmt_date(from_date)}) must not be after to_date ({fmt_date(to_date)})."
         )
 
     collected = []

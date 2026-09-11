@@ -154,7 +154,7 @@ def upsert_corporate_actions_metadata(
     -- the run-level audit record for the CSV pipeline, analogous to
     bhavcopy_persistence.py's _upsert_metadata()/bhav_copy_metadata, but
     keyed by date RANGE rather than a single trade_date (see
-    015.01.00's changelog comment for why).
+    013.03.00's changelog comment for why).
 
     summary: the dict returned by csv_pipeline.py's
     process_corporate_actions_rows()/run_csv_pipeline() (or None on a
@@ -223,6 +223,38 @@ def upsert_corporate_actions_metadata(
                 )
     except Exception as e:
         raise CorporateActionsPersistenceError(f"Failed to upsert corporate_actions_metadata: {e}")
+
+
+def is_fresh_through(conn, ceiling_date):
+    """
+    True if BOTH NSE and BSE already have a SUCCESS
+    corporate_actions_metadata row whose to_date covers ceiling_date --
+    i.e. this cycle's own latest trading session (4pm today through
+    3:30pm tomorrow) is already accounted for, so there's genuinely
+    nothing new for STEP 3 to do. ADDED 2026-08-30 so
+    corporate_actions_runner.run() can check its OWN freshness
+    independently of STEP 2's any_new_data outcome (see that module's
+    own header for the full reasoning).
+
+    An exchange with NO successful row at all counts as NOT fresh
+    (returns False overall) -- same as one whose latest SUCCESS row's
+    to_date falls short of ceiling_date.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT exchange, MAX(to_date) FROM corporate_actions_metadata "
+                " WHERE run_status = 'SUCCESS' GROUP BY exchange"
+            )
+            latest_by_exchange = dict(cur.fetchall())
+    except Exception as e:
+        raise CorporateActionsPersistenceError(f"Failed to check corporate_actions_metadata freshness: {e}")
+
+    for exchange in ("NSE", "BSE"):
+        latest = latest_by_exchange.get(exchange)
+        if latest is None or latest < ceiling_date:
+            return False
+    return True
 
 
 def persist_raw(conn, parsed_rows, source_url):
