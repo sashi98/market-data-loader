@@ -237,7 +237,7 @@ def _standalone_run():
             sys.exit(1)
         today = date.today()
         summary = run(env_values, env_values["TMT_APP_BASE_URL"], token,
-                       env_values["BHAV_COPY_CSV_DOWNLOAD_DIR"], "NSE", today, today, today)
+                       env_values["DATA_MARKET_DATA_LOADER_BHAV_COPY_DOWNLOAD_DIR"], "NSE", today, today, today)
         print(f"\nSummary: {summary}")
 
 

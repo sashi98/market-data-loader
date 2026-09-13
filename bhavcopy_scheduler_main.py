@@ -641,7 +641,7 @@ def check_and_process(env_values):
             status = f"GAP -- will process through {fmt_date(latest_trade_date)}" if gap[exchange] else "up to date"
             logger.info(f"  [{exchange}] bhav_copy_metadata freshness: {fmt_date(freshness[exchange]) or 'none yet'} -- {status}.")
 
-        download_dir = env_values["BHAV_COPY_CSV_DOWNLOAD_DIR"]
+        download_dir = env_values["DATA_MARKET_DATA_LOADER_BHAV_COPY_DOWNLOAD_DIR"]
 
         # STEP 2 -- Daily Bhav Copy Runner, per exchange, blind upsert
         # over its own incremental [start, latest_trade_date] window.
