@@ -465,20 +465,34 @@ def record_enrichment_audit_rows(conn, run_id, audit_rows):
         raise StockUniversePersistenceError(f"Failed to record enrichment audit rows for run_id={run_id}: {e}")
 
 
-def set_maintenance_running(conn, is_running):
+def set_enrichment_running(conn, is_running):
     """
-    Updates the SINGLETON maintenance_status row (id=1, from 001.05.00)
-    to reflect whether a maintenance job (currently just this enrichment
-    listener, but the table itself is generic -- see 001.05.00's own
-    comment) is running right now. A Spring Security filter on the Java
-    side checks this on EVERY single request to show a global
-    "maintenance in progress" banner across the whole app -- this table
-    should never have more than one row, and this function always
-    targets id=1 specifically.
+    Updates the SINGLETON maintenance_status row (id=1, from 001.05.00,
+    split into per-process flags by 001.08.00) to reflect whether THIS
+    process's (stock_universe_update_listener.py's) enrichment batch is
+    running right now. Renamed from set_maintenance_running() 2026-09-13
+    -- see set_scheduler_running()'s own docstring (the sibling function
+    added alongside this rename) for the full story of why a single
+    shared is_running boolean, written blindly by two independent
+    forever-running processes, was a real bug: whichever process
+    finished first cleared the flag out from under the other one still
+    running.
 
-    Setting is_running=True also refreshes started_at to now(); setting
-    it False leaves started_at UNCHANGED, so it still reflects when the
-    most recent job actually began.
+    Writes enrichment_running (and enrichment_started_at, on the
+    off->on transition) -- columns ONLY this process ever writes, never
+    the scheduler. is_running/started_at are then RECOMPUTED in the same
+    statement as (enrichment_running OR the scheduler's own
+    scheduler_running, read live from the same row) -- so this function
+    can never clobber a scheduler cycle that's genuinely still running,
+    and MaintenanceModeFilter.java / the NavBar's MaintenanceIndicator
+    (which only ever read the combined is_running/started_at) need no
+    changes at all.
+
+    started_at semantics are UNCHANGED from the original
+    set_maintenance_running(): refreshed to now() only on the false->true
+    transition of the COMBINED flag, left untouched otherwise (including
+    on the true->false transition, so it still reflects when the most
+    recent job actually began).
 
     CRITICAL: callers MUST call this with is_running=False in a
     finally block, not just on the normal success path -- if a job
@@ -493,15 +507,88 @@ def set_maintenance_running(conn, is_running):
     """
     query = """
         UPDATE maintenance_status
-           SET is_running = %s,
-               started_at = CASE WHEN %s THEN CURRENT_TIMESTAMP ELSE started_at END,
+           SET enrichment_running = %(v)s,
+               enrichment_started_at = CASE WHEN %(v)s THEN CURRENT_TIMESTAMP ELSE enrichment_started_at END,
+               is_running = (%(v)s OR scheduler_running),
+               started_at = CASE
+                                WHEN (%(v)s OR scheduler_running) AND NOT is_running THEN CURRENT_TIMESTAMP
+                                ELSE started_at
+                            END,
                updated_at = CURRENT_TIMESTAMP
          WHERE id = 1
     """
     try:
         with conn.cursor() as cur:
-            cur.execute(query, (is_running, is_running))
+            cur.execute(query, {"v": is_running})
         conn.commit()
     except Exception as e:
         conn.rollback()
-        raise StockUniversePersistenceError(f"Failed to update maintenance status: {e}")
+        raise StockUniversePersistenceError(f"Failed to update enrichment maintenance status: {e}")
+
+
+def set_scheduler_running(conn, is_running):
+    """
+    Sibling of set_enrichment_running() above, ADDED 2026-09-13 for
+    bhavcopy_scheduler_main.py's own AMH/BMH cycle -- see that function's
+    own docstring for the full background on why maintenance_status was
+    split into independent per-process flags.
+
+    Lives here (in the enrichment listener's own persistence module)
+    rather than in a bhavcopy_scheduler_main.py-local helper because
+    maintenance_status is explicitly a generic, shared table (see
+    001.05.00's own comment: "any long-running admin/maintenance process
+    can set is_running=true ... if a second job needs this same signal,
+    it uses this same row") and all of that table's SQL was already
+    consolidated here -- bhavcopy_scheduler_main.py already imports
+    set_scheduler_running (formerly set_maintenance_running) from this
+    exact module for exactly this table.
+
+    Same started_at semantics as set_enrichment_running(): refreshed to
+    now() only on the combined flag's false->true transition, otherwise
+    untouched.
+    """
+    query = """
+        UPDATE maintenance_status
+           SET scheduler_running = %(v)s,
+               scheduler_started_at = CASE WHEN %(v)s THEN CURRENT_TIMESTAMP ELSE scheduler_started_at END,
+               is_running = (%(v)s OR enrichment_running),
+               started_at = CASE
+                                WHEN (%(v)s OR enrichment_running) AND NOT is_running THEN CURRENT_TIMESTAMP
+                                ELSE started_at
+                            END,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = 1
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, {"v": is_running})
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise StockUniversePersistenceError(f"Failed to update scheduler maintenance status: {e}")
+
+
+def is_scheduler_running(conn):
+    """
+    ADDED 2026-09-13 -- used by poll_once() to defer starting a new
+    enrichment batch while bhavcopy_scheduler_main.py's own cycle is in
+    progress (the other half of the mutual-exclusion fix; the upload
+    itself is already blocked while the scheduler runs, at the point of
+    upload -- see StockUniverseDataSetupService#getUploadGateStatus() on
+    the Java side -- so this is a defensive second check, not the
+    primary one, covering a batch that became ready just before the
+    scheduler's cycle started).
+
+    Returns False (not True) on any read failure -- deliberately fails
+    OPEN here, matching this file's existing convention of never letting
+    a transient DB hiccup block real work; a stuck "scheduler is running"
+    read would otherwise silently stall enrichment forever.
+    """
+    query = "SELECT scheduler_running FROM maintenance_status WHERE id = 1"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+        return bool(row[0]) if row else False
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to check scheduler running status: {e}")

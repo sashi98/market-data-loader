@@ -189,7 +189,7 @@ from core.db_client import get_connection, DbConnectionError
 from core.indicators.persistence import (
     fetch_iwm_freshness, activate_indicator, deactivate_indicator, IndicatorsPersistenceError,
 )
-from core.stock_universe.persistence import set_maintenance_running, StockUniversePersistenceError
+from core.stock_universe.persistence import set_scheduler_running, StockUniversePersistenceError
 from core.rollup.rollup_persistence import get_metadata_freshness, RollupPersistenceError
 from core.trading_calendar import compute_trading_date_range, TradingCalendarError
 from core.date_format import fmt_date, fmt_datetime
@@ -226,18 +226,26 @@ EXCHANGES = ["NSE", "BSE"]
 # -- see this file's own header, "NEW VARIABLES".
 DEFAULT_START_DATE = date(2024, 1, 1)
 
-# STOCK UNIVERSE READINESS GATE (2026-09-11) -- confirmed with
-# Sashikant: before this scheduler ever enters STEP 1's AMH/BMH cycle
-# logic, it must first confirm the stock universe has been fully
-# enriched at least once in this environment. stock_universe_metadata
-# gets one row per (data_source, segment) integration attempt, written
-# by the separate stock_universe_update_listener.py process (see this
-# file's own header -- no coupling exists between the two processes
-# otherwise, so on a brand-new environment this scheduler could
-# otherwise race ahead of stock universe enrichment and run STEP 2
-# onward against an empty/partial universe). Checked exactly ONCE at
-# process startup (not re-checked every cycle) -- see
-# _wait_for_stock_universe_ready().
+# STOCK UNIVERSE READINESS GATE (2026-09-11, FIXED 2026-09-13) --
+# confirmed with Sashikant: before this scheduler ever enters STEP 1's
+# AMH/BMH cycle logic, it must first confirm the stock universe has
+# been fully enriched at least once in this environment. That means
+# TWO things, both checked by _stock_universe_ready(): every required
+# (data_source, segment) row in stock_universe_metadata is
+# status='success' (written the moment the RAW CSV upload/parse
+# succeeds), AND the separate stock_universe_update_listener.py
+# process's own enrichment pass over that exact batch has actually
+# FINISHED (its stock_universe_enrichment_run cursor has caught up) --
+# the first condition alone was the original 2026-09-11 gate, and was
+# found 2026-09-13 to fire far too early, since raw upload success and
+# "enrichment listener is done" can be up to ~175 minutes apart (see
+# _stock_universe_ready's own docstring for the full mechanics). No
+# coupling exists between the two processes beyond reading the same
+# tables the listener writes, so on a brand-new environment this
+# scheduler could otherwise race ahead of stock universe enrichment and
+# run STEP 2 onward against an empty/partial/still-enriching universe.
+# Checked exactly ONCE at process startup (not re-checked every cycle)
+# -- see _wait_for_stock_universe_ready().
 REQUIRED_STOCK_UNIVERSE_SOURCES = [
     ("nse_data", "CASH"),
     ("nse_sme_data", "CASH"),
@@ -544,6 +552,15 @@ def _set_maintenance(env_values, is_running):
     """
     Short-lived connection just for this one maintenance_status write.
     Returns True on success, False (already printed) on any failure.
+
+    UPDATED 2026-09-13 -- writes scheduler_running specifically (via
+    set_scheduler_running(), renamed from the old shared
+    set_maintenance_running()), never the listener's own
+    enrichment_running -- see that function's own docstring in
+    core/stock_universe/persistence.py for why maintenance_status was
+    split into independent per-process flags. This function's own name
+    and behavior are otherwise unchanged: it still just marks THIS
+    process's own cycle as running/not-running.
     """
     try:
         conn = get_connection(env_values)
@@ -551,7 +568,7 @@ def _set_maintenance(env_values, is_running):
         logger.error(f"  [FAILED] Could not connect to DB to update maintenance status: {e}")
         return False
     try:
-        set_maintenance_running(conn, is_running)
+        set_scheduler_running(conn, is_running)
         return True
     except StockUniversePersistenceError as e:
         logger.error(f"  [FAILED] Could not update maintenance status: {e}")
@@ -716,37 +733,95 @@ def check_and_process(env_values):
 
 def _stock_universe_ready(env_values):
     """
-    True if every required (data_source, segment) combination in
-    REQUIRED_STOCK_UNIVERSE_SOURCES has at least one row with
-    status = 'success' in stock_universe_metadata. Returns False (never
-    raises) on a DB error -- treated the same as "not ready yet" so a
-    transient connection failure just gets retried on the next poll,
-    same degrade-and-continue convention this file already uses
-    elsewhere (see _bhav_copy_freshness_per_exchange's own caller in
-    check_and_process()).
+    True only if BOTH:
+      1. every required (data_source, segment) combination in
+         REQUIRED_STOCK_UNIVERSE_SOURCES has at least one row with
+         status = 'success' in stock_universe_metadata, AND
+      2. the SEPARATE stock_universe_update_listener.py process has
+         actually FINISHED enriching that exact batch -- not just
+         started it, and not still be mid-batch.
+
+    FIXED (2026-09-13) -- Sashikant's own observation: this check
+    originally looked at stock_universe_metadata.status alone, which
+    StockUniverseServiceHandler#saveOrUpdate() (Java side) sets to
+    'success' the moment the RAW CSV is parsed and persisted -- BEFORE
+    stock_universe_update_listener.py's own enrichment pass (yfinance/
+    NSE/BSE-official lookups per ISIN, up to ~175 min for a full batch)
+    has even started. So this gate could -- and did -- declare the
+    stock universe "ready" while enrichment was still running or had
+    not started at all, letting STEP 2 onward proceed against an
+    unenriched/partially-enriched universe.
+
+    Condition 2 mirrors exactly what stock_universe_update_listener.py's
+    own poll_once() uses to decide "is there new work to enrich" (see
+    that file's core/stock_universe/persistence.py --
+    fetch_latest_metadata_status/get_max_metadata_id/
+    fetch_last_processed_cursor): take the highest stock_universe_metadata
+    id among the 5 required (data_source, segment) rows, and compare it
+    against the listener's own persisted cursor -- the
+    last_processed_metadata_id of its most recent stock_universe_enrichment_run
+    row with status IN ('SUCCESS', 'PARTIAL'). The listener only writes
+    that row once a REAL (non---limit) enrichment batch has fully
+    completed (see run_enrichment_batch's own docstring there), so
+    cursor >= max_metadata_id means enrichment for this exact upload is
+    done, not just in progress.
+
+    Deliberately duplicates these two small queries here rather than
+    importing core.stock_universe.persistence from the listener's own
+    package -- this file's own header already documents "no coupling
+    exists between the two processes," and that stays true: this only
+    reads the same two tables the listener already writes to, it never
+    reaches into the listener's code.
+
+    Returns False (never raises) on a DB error -- treated the same as
+    "not ready yet" so a transient connection failure just gets retried
+    on the next poll, same degrade-and-continue convention this file
+    already uses elsewhere (see _bhav_copy_freshness_per_exchange's own
+    caller in check_and_process()).
     """
     try:
         conn = get_connection(env_values)
         try:
             missing = []
+            max_metadata_id = 0
             with conn.cursor() as cur:
                 for data_source, segment in REQUIRED_STOCK_UNIVERSE_SOURCES:
                     cur.execute(
-                        "SELECT 1 FROM stock_universe_metadata WHERE data_source = %s AND segment = %s "
-                        "AND status = 'success' LIMIT 1",
+                        "SELECT id FROM stock_universe_metadata WHERE data_source = %s AND segment = %s "
+                        "AND status = 'success' ORDER BY id DESC LIMIT 1",
                         (data_source, segment),
                     )
-                    if cur.fetchone() is None:
+                    row = cur.fetchone()
+                    if row is None:
                         missing.append(f"{data_source}/{segment}")
+                    else:
+                        max_metadata_id = max(max_metadata_id, row[0])
+
+                if missing:
+                    logger.info(f"  Stock universe not ready yet -- still waiting on: {', '.join(missing)}.")
+                    return False
+
+                # All 5 uploads are in -- now check whether enrichment has
+                # actually caught up to this batch, same cursor comparison
+                # stock_universe_update_listener.py's own poll_once() does.
+                cur.execute(
+                    "SELECT last_processed_metadata_id FROM stock_universe_enrichment_run "
+                    "WHERE status IN ('SUCCESS', 'PARTIAL') ORDER BY id DESC LIMIT 1"
+                )
+                cursor_row = cur.fetchone()
+                enrichment_cursor = cursor_row[0] if cursor_row else 0
         finally:
             conn.close()
     except DbConnectionError as e:
-        logger.warning(f"  [WARN] Could not check stock_universe_metadata readiness: {e} -- treating as not ready.")
+        logger.warning(f"  [WARN] Could not check stock_universe_metadata/enrichment readiness: {e} -- treating as not ready.")
         return False
 
-    if missing:
-        logger.info(f"  Stock universe not ready yet -- still waiting on: {', '.join(missing)}.")
+    if enrichment_cursor < max_metadata_id:
+        logger.info(f"  Stock universe uploads are all present (max metadata id {max_metadata_id}), but the "
+                    f"enrichment listener hasn't finished processing this batch yet (cursor at "
+                    f"{enrichment_cursor}) -- waiting for it to complete.")
         return False
+
     return True
 
 

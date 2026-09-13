@@ -128,7 +128,7 @@ from core.stock_universe.persistence import (
     fetch_latest_metadata_status, is_batch_ready, get_max_metadata_id,
     fetch_last_processed_cursor, fetch_isin_exchange_map,
     update_stock_fundamentals, normalize_field_value, record_enrichment_run,
-    record_enrichment_audit_rows, set_maintenance_running, StockUniversePersistenceError,
+    record_enrichment_audit_rows, set_enrichment_running, is_scheduler_running, StockUniversePersistenceError,
 )
 from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_DELAY_SECONDS
 from core.stock_universe.tradingview_client import fetch_fundamentals_tradingview, TRADINGVIEW_COVERABLE_FIELDS
@@ -566,7 +566,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
     if limit is None:
         try:
             conn = get_connection(env_values)
-            set_maintenance_running(conn, True)
+            set_enrichment_running(conn, True)
             conn.close()
         except (DbConnectionError, StockUniversePersistenceError) as e:
             logger.error(f"  [FAILED] Could not set maintenance status -- aborting batch rather than running without the banner active: {e}")
@@ -578,7 +578,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
         if limit is None:
             try:
                 conn = get_connection(env_values)
-                set_maintenance_running(conn, False)
+                set_enrichment_running(conn, False)
                 conn.close()
             except (DbConnectionError, StockUniversePersistenceError) as e:
                 logger.error(f"  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
@@ -711,6 +711,7 @@ def poll_once(env_values, limit=None, last_idle_state=None):
         conn = get_connection(env_values)
         metadata_status = fetch_latest_metadata_status(conn)
         cursor = fetch_last_processed_cursor(conn)
+        scheduler_running = is_scheduler_running(conn)
         conn.close()
     except (DbConnectionError, StockUniversePersistenceError) as e:
         logger.info("=" * 60)
@@ -744,6 +745,33 @@ def poll_once(env_values, limit=None, last_idle_state=None):
         logger.info("=" * 60)
         logger.info(f"  Already enriched through metadata id {cursor} -- no new batch since then.")
         logger.info("  (Suppressing this message on subsequent cycles until a new batch appears.)")
+        if last_idle_state is not None:
+            last_idle_state["key"] = idle_key
+        return
+
+    # MUTUAL EXCLUSION (2026-09-13) -- confirmed with Sashikant: only one
+    # of {bhavcopy_scheduler_main.py, this listener} should ever be
+    # active at a time. The PRIMARY enforcement is upstream of this --
+    # StockUniverseDataSetupService#getUploadGateStatus() (Java side)
+    # already refuses a stock-universe upload while the scheduler is
+    # running, so under normal operation a new batch simply can't become
+    # ready during a scheduler cycle in the first place. This check is
+    # the defensive second layer, covering the narrow window where a
+    # batch became ready (all 5 uploads succeeded) just BEFORE the
+    # scheduler's cycle started. Deferred, not dropped -- max_metadata_id
+    # stays > cursor, so the very next poll (or the scheduler clearing
+    # scheduler_running when its cycle ends) picks this back up
+    # immediately; nothing about the batch itself is lost or skipped.
+    if scheduler_running:
+        idle_key = ("scheduler_running", max_metadata_id)
+        if last_idle_state is not None and last_idle_state.get("key") == idle_key:
+            return
+        logger.info("=" * 60)
+        logger.info("  Stock Universe enrichment listener -- poll cycle starting")
+        logger.info("=" * 60)
+        logger.info(f"  New batch is ready (metadata id {max_metadata_id}), but bhavcopy_scheduler_main.py's own "
+                    f"cycle is currently running -- deferring enrichment until it finishes.")
+        logger.info("  (Suppressing this message on subsequent cycles until the state changes.)")
         if last_idle_state is not None:
             last_idle_state["key"] = idle_key
         return
