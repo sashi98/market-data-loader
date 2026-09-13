@@ -94,6 +94,7 @@ RAW_BHAV_COPY_SQL = f"""
                {TIEBREAK_RANK_SQL}
           FROM bhav_copy bc
          WHERE bc.exchange = %(exchange)s
+           AND bc.isin = ANY(%(isins)s)
            AND {ELIGIBLE_SERIES_EXISTS_SQL}
            AND {MIN_LIQUIDITY_FILTER_SQL}
     )
@@ -106,20 +107,104 @@ RAW_BHAV_COPY_SQL = f"""
 """
 
 
-def fetch_raw_bhav_copy(conn, exchange):
+def fetch_raw_bhav_copy(conn, exchange, isins):
     """
     Continuity-eligible, same-day-tiebroken bhav_copy rows for one
-    exchange -- the SAME eligibility/tiebreak rules
-    core/rsi/rsi_persistence.py already applies (core/rsi/
+    exchange, restricted to `isins` -- the SAME eligibility/tiebreak
+    rules core/rsi/rsi_persistence.py already applies (core/rsi/
     rsi_continuity.py), reused here rather than reimplemented, since
     bhav_copy_adjusted needs to guarantee exactly one row per
     (security_id, exchange, trade_date) for ANY downstream consumer,
     not just RSI.
+
+    CHUNKED 2026-09-13 -- `isins` is now REQUIRED (was: every eligible
+    isin for the exchange, fetched in one call). The caller
+    (bhav_copy_d_price_adjustment_runner.py) now passes one
+    security-id batch at a time -- see chunk_isins_by_security() below
+    for why the batching happens by security_id, not by isin or date
+    range. This is what actually bounds STEP 4's own memory footprint;
+    upsert_bhav_copy_adjusted()'s COMMIT_EVERY_ROWS chunking (below)
+    only ever bounded the Postgres transaction size, not this
+    process's own memory -- the full unchunked fetch+build was still
+    what caused the 2026-09-12/13 crash.
     """
     try:
-        return pd.read_sql(RAW_BHAV_COPY_SQL, conn, params={"exchange": exchange})
+        return pd.read_sql(RAW_BHAV_COPY_SQL, conn, params={"exchange": exchange, "isins": list(isins)})
     except Exception as e:
         raise AdjustedSeriesError(f"Failed to fetch raw bhav_copy for {exchange}: {e}")
+
+
+DISTINCT_ISINS_SQL = f"""
+    SELECT DISTINCT bc.isin
+      FROM bhav_copy bc
+     WHERE bc.exchange = %(exchange)s
+       AND {ELIGIBLE_SERIES_EXISTS_SQL}
+       AND {MIN_LIQUIDITY_FILTER_SQL}
+"""
+
+
+def fetch_distinct_isins(conn, exchange):
+    """
+    ADDED 2026-09-13 (chunking fix) -- just the distinct,
+    continuity-eligible isins for one exchange, none of the OHLC
+    columns and no same-day tiebreak (irrelevant to a plain distinct
+    listing). Used to plan security-id batches BEFORE fetching any
+    actual price rows -- see chunk_isins_by_security().
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(DISTINCT_ISINS_SQL, {"exchange": exchange})
+            return [row[0] for row in cur.fetchall()]
+    except Exception as e:
+        raise AdjustedSeriesError(f"Failed to fetch distinct isins for {exchange}: {e}")
+
+
+# ADDED 2026-09-13 (chunking fix) -- number of security_ids' worth of
+# isins fetched+built+upserted per batch. Chunking by security_id
+# (never by date range) is the only safe boundary here: this module's
+# own docstring and bhav_copy_d_price_adjustment_runner.py's header
+# both establish that a full recompute is required PER SECURITY,
+# because a newly-discovered corporate action can retroactively change
+# any historical row for that security, and build_adjusted_series()'s
+# prev_close/adjustment-factor math needs a security's entire sorted
+# history in one call to be correct. Date-range chunking would violate
+# that. Security_id chunking preserves it exactly -- each batch still
+# gets one security's FULL history, just fewer securities per call.
+# ~500 securities/batch keeps each batch to roughly a few hundred
+# thousand rows even for a security with years of history, well under
+# the ~1.8-2.7M-row full-exchange size that caused the OOM.
+DEFAULT_SECURITY_BATCH_SIZE = 500
+
+
+def chunk_isins_by_security(isins, lineage_map, batch_size=DEFAULT_SECURITY_BATCH_SIZE):
+    """
+    Groups isins by their resolved security_id -- so every isin that
+    bridges into the same continuous identity via
+    security_identity_lineage stays in the SAME batch, since
+    build_adjusted_series() needs a security's full sorted history in
+    one call -- then splits those security_id groups into batches of
+    up to `batch_size` security_ids each.
+
+    Returns a list of isin-lists, one per batch. The batches partition
+    the input isins exactly (every isin appears in exactly one batch,
+    grouped with every other isin sharing its security_id), so a
+    caller summing per-batch security_count / row_count / etc. across
+    batches gets the correct exchange-wide total with no double
+    counting and no risk of splitting one security's history across
+    two batches.
+    """
+    isins_by_security = {}
+    for isin in isins:
+        security_id = resolve_security_id(isin, lineage_map)
+        isins_by_security.setdefault(security_id, []).append(isin)
+
+    security_ids = list(isins_by_security.keys())
+    batches = []
+    for start in range(0, len(security_ids), batch_size):
+        batch_security_ids = security_ids[start:start + batch_size]
+        batch_isins = [isin for security_id in batch_security_ids for isin in isins_by_security[security_id]]
+        batches.append(batch_isins)
+    return batches
 
 
 MATCHED_CORPORATE_ACTIONS_SQL = """
