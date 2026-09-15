@@ -31,8 +31,12 @@ FROM python:3.11-slim
 
 # gcc -- psycopg2-binary ships wheels, but pandas/nse/bse's own
 # transitive deps occasionally need a compiler
+# tzdata -- ADDED 2026-09-14. python:3.11-slim has no zoneinfo database by
+# default, so a TZ env var (set via docker-compose's `environment: TZ:`,
+# see docker-compose.template.yml) is silently ignored without this --
+# every log timestamp and datetime.now() call stays in UTC regardless.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends gcc \
+    && apt-get install -y --no-install-recommends gcc tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
