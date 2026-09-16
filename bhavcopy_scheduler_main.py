@@ -189,7 +189,10 @@ from core.db_client import get_connection, DbConnectionError
 from core.indicators.persistence import (
     fetch_iwm_freshness, activate_indicator, deactivate_indicator, IndicatorsPersistenceError,
 )
-from core.stock_universe.persistence import set_scheduler_running, StockUniversePersistenceError
+from core.stock_universe.persistence import (
+    set_scheduler_running, reconcile_stale_scheduler_lock, MAX_SCHEDULER_CYCLE_SECONDS,
+    StockUniversePersistenceError,
+)
 from core.rollup.rollup_persistence import get_metadata_freshness, RollupPersistenceError
 from core.trading_calendar import compute_trading_date_range, TradingCalendarError
 from core.date_format import fmt_date, fmt_datetime
@@ -428,6 +431,41 @@ def _run_rollup_step(env_values, runner_module, gap, latest_trade_date):
         runner_module.run(env_values, exchange, DEFAULT_START_DATE, latest_trade_date)
 
 
+def _indicators_pending(env_values, latest_trade_date):
+    """
+    ADDED 2026-09-16 -- read-only pre-check mirroring
+    _activate_indicators()'s own staleness test below, WITHOUT calling
+    activate_indicator() (no side effects). Used by check_and_process()
+    to decide, BEFORE entering maintenance mode, whether STEP 7/8 will
+    have any real work this cycle -- STEP 7 is not gated on gap[] at
+    all (see _activate_indicators()'s own docstring), so a cycle where
+    every exchange is already up to date can still have real indicator
+    work pending, and that work still needs maintenance-mode
+    protection.
+
+    Fails toward True (i.e. "treat as pending, run protected") on any
+    read failure, matching this file's existing fail-safe convention
+    for the freshness read right above where this is called -- a
+    failed check must never look like "nothing to do."
+    """
+    try:
+        conn = get_connection(env_values)
+    except DbConnectionError as e:
+        logger.error(f"  [FAILED] Could not connect to DB to check indicator freshness: {e}")
+        return True
+
+    try:
+        try:
+            iwm_latest_by_indicator = fetch_iwm_freshness(conn)
+        except IndicatorsPersistenceError as e:
+            logger.error(f"  [FAILED] Could not fetch indicators_workbook_metadata: {e}")
+            return True
+    finally:
+        conn.close()
+
+    return any(_own_target_stale(iwm_latest, latest_trade_date) for iwm_latest in iwm_latest_by_indicator.values())
+
+
 def _activate_indicators(env_values, latest_trade_date):
     """
     STEP 7 -- Indicators Registry Update. REDESIGNED 2026-09-06:
@@ -617,6 +655,48 @@ def check_and_process(env_values):
               f"skipping this cycle.")
         return False
 
+    logger.info(f"  Latest trade date this cycle: {fmt_date(latest_trade_date)}.")
+
+    # ADDED 2026-09-16 -- freshness/gap AND indicator-pending are both
+    # computed BEFORE entering maintenance mode. Both are plain reads
+    # (no upserts), so neither needs the maintenance flag's protection,
+    # and computing them first lets this cycle decide whether there is
+    # any REAL work before flipping maintenance_status on at all.
+    # Previously maintenance mode was entered unconditionally for every
+    # cycle attempt, even one where every exchange was already up to
+    # date and no indicator was stale -- needlessly showing every user
+    # "Scheduled maintenance is underway" for however long a
+    # fully-skipped cycle still took to walk through its own
+    # per-exchange freshness checks.
+    try:
+        conn = get_connection(env_values)
+        try:
+            freshness = _bhav_copy_freshness_per_exchange(conn)
+        finally:
+            conn.close()
+    except DbConnectionError as e:
+        logger.error(f"  [FAILED] Could not read bhav_copy_metadata freshness: {e} -- treating every exchange as "
+                      f"GAPPED so this cycle still runs protected rather than silently skipping real work.")
+        # Fail toward running the cycle protected, not toward skipping
+        # it -- a freshness-read failure must never be mistaken for
+        # "nothing to do" (freshness=None makes _gap_detected() return
+        # True for every exchange below, same fail-safe this file
+        # already relied on before this restructure).
+        freshness = {exchange: None for exchange in EXCHANGES}
+
+    gap = {exchange: _gap_detected(freshness[exchange], latest_trade_date) for exchange in EXCHANGES}
+    for exchange in EXCHANGES:
+        status = f"GAP -- will process through {fmt_date(latest_trade_date)}" if gap[exchange] else "up to date"
+        logger.info(f"  [{exchange}] bhav_copy_metadata freshness: {fmt_date(freshness[exchange]) or 'none yet'} -- {status}.")
+
+    indicators_pending = _indicators_pending(env_values, latest_trade_date)
+    has_real_work = any(gap.values()) or indicators_pending
+
+    if not has_real_work:
+        logger.info("  Nothing to process this cycle -- every exchange is already up to date and no indicator "
+                     "is stale. Skipping maintenance mode entirely (no upserts needed).")
+        return True
+
     if not _set_maintenance(env_values, True):
         logger.error("  [FAILED] Could not enter maintenance mode -- skipping this cycle rather than running unprotected.")
         return False
@@ -624,23 +704,6 @@ def check_and_process(env_values):
     # CRITICAL: this finally block is what guarantees maintenance mode
     # never stays stuck on.
     try:
-        logger.info(f"  Latest trade date this cycle: {fmt_date(latest_trade_date)}.")
-
-        try:
-            conn = get_connection(env_values)
-            try:
-                freshness = _bhav_copy_freshness_per_exchange(conn)
-            finally:
-                conn.close()
-        except DbConnectionError as e:
-            logger.error(f"  [FAILED] Could not read bhav_copy_metadata freshness: {e} -- skipping this cycle's runners.")
-            freshness = {exchange: None for exchange in EXCHANGES}
-
-        gap = {exchange: _gap_detected(freshness[exchange], latest_trade_date) for exchange in EXCHANGES}
-        for exchange in EXCHANGES:
-            status = f"GAP -- will process through {fmt_date(latest_trade_date)}" if gap[exchange] else "up to date"
-            logger.info(f"  [{exchange}] bhav_copy_metadata freshness: {fmt_date(freshness[exchange]) or 'none yet'} -- {status}.")
-
         download_dir = env_values["DATA_MARKET_DATA_LOADER_BHAV_COPY_DOWNLOAD_DIR"]
 
         # STEP 2 -- Daily Bhav Copy Runner, per exchange, blind upsert
@@ -899,6 +962,30 @@ def run():
         except EnvValidationError as e:
             logger.error(f"[FAILED] {e}")
             sys.exit(1)
+
+        # ADDED 2026-09-16 -- one-time startup check for a stale
+        # scheduler_running lock left behind by a previous instance of
+        # THIS SAME process that was killed hard (SIGKILL, OOM, power
+        # loss, terminal closed) before it could reach its own
+        # check_and_process() finally block. See
+        # reconcile_stale_scheduler_lock()'s own docstring for why this
+        # only ever runs once here, at startup, never mid-loop.
+        try:
+            conn = get_connection(env_values)
+            try:
+                healed = reconcile_stale_scheduler_lock(conn)
+            finally:
+                conn.close()
+            if healed:
+                logger.warning(
+                    f"[RECOVERED] Found a stale scheduler_running lock (older than "
+                    f"{MAX_SCHEDULER_CYCLE_SECONDS // 3600}h) at startup -- a previous run must have been "
+                    f"killed before it could clean up after itself. Cleared it so the app isn't stuck showing "
+                    f"maintenance mode to every user. If this keeps happening, find out why the process keeps "
+                    f"dying mid-cycle."
+                )
+        except (DbConnectionError, StockUniversePersistenceError) as e:
+            logger.warning(f"Could not check for a stale scheduler lock at startup: {e} -- continuing anyway.")
 
         _wait_for_stock_universe_ready(env_values)
 

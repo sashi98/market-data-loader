@@ -18,6 +18,7 @@
 # with zero risk of one exchange's value leaking onto the other's row.
 
 from psycopg2.extras import Json
+from datetime import datetime
 import math
 
 REQUIRED_DATA_SOURCES = ["nse_data", "nse_sme_data", "bse_data", "bse_sme_data", "nse_fno_data"]
@@ -592,3 +593,67 @@ def is_scheduler_running(conn):
         return bool(row[0]) if row else False
     except Exception as e:
         raise StockUniversePersistenceError(f"Failed to check scheduler running status: {e}")
+
+# Generous upper bound on how long a single scheduler cycle should ever
+# take -- STEPS 2-8 process at most one trading day's worth of
+# incremental data per exchange plus any newly-stale indicators, which
+# in practice completes in minutes, not hours. Set high enough to never
+# false-positive on a genuinely slow cycle, low enough to catch an
+# orphaned lock from a hard-killed process (SIGKILL, OOM, power loss,
+# terminal closed) well before a human would otherwise notice the app
+# stuck in maintenance mode.
+MAX_SCHEDULER_CYCLE_SECONDS = 6 * 60 * 60  # 6 hours
+
+
+def reconcile_stale_scheduler_lock(conn, max_age_seconds=MAX_SCHEDULER_CYCLE_SECONDS):
+    """
+    ADDED 2026-09-16 -- safety net for the gap set_scheduler_running()'s
+    own docstring already calls out: try/finally protects against a
+    normal exception, but NOTHING protects against this process being
+    killed hard (SIGKILL, OOM, power loss, terminal closed) between
+    setting scheduler_running=True and reaching that finally. When that
+    happens, the flag is stuck True forever and every user sees
+    "Scheduled maintenance is underway" indefinitely, even though
+    nothing is actually running -- confirmed as a real, live incident
+    2026-09-16 (scheduler_started_at over 12 hours in the past while a
+    freshly-started scheduler process sat idle between cycle windows).
+
+    Call this ONCE, at scheduler process startup, before the main loop
+    -- NOT on every cycle -- since only a brand-new process instance is
+    in a position to say "the previous holder of this lock is gone and
+    it wasn't me." A currently-running scheduler process's own lock
+    should never be second-guessed by itself mid-cycle.
+
+    Only ever touches scheduler_running/scheduler_started_at -- never
+    enrichment_running, which is stock_universe_update_listener.py's own
+    lock to heal (same pattern would apply there if it's ever needed;
+    out of scope for this fix).
+
+    Returns True if a stale lock was found and cleared (caller should
+    log this loudly -- it means a previous run crashed ungracefully),
+    False if the lock was either not held or genuinely fresh (i.e.
+    within max_age_seconds -- deliberately NOT cleared, since a second
+    scheduler instance starting up while a first one is legitimately
+    mid-cycle should never steal its lock).
+    """
+    query = "SELECT scheduler_running, scheduler_started_at FROM maintenance_status WHERE id = 1"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to check scheduler lock staleness: {e}")
+
+    if not row or not row[0] or row[1] is None:
+        return False
+
+    scheduler_running, scheduler_started_at = row
+    age_seconds = (datetime.now() - scheduler_started_at).total_seconds()
+    if age_seconds <= max_age_seconds:
+        return False
+
+    # Stale -- clear it exactly the way a normal cycle-end would, via
+    # the same OR-recompute UPDATE set_scheduler_running() uses, so this
+    # can never clobber a genuinely-running enrichment_running flag.
+    set_scheduler_running(conn, False)
+    return True
