@@ -190,7 +190,7 @@ from core.indicators.persistence import (
     fetch_iwm_freshness, activate_indicator, deactivate_indicator, IndicatorsPersistenceError,
 )
 from core.stock_universe.persistence import (
-    set_scheduler_running, reconcile_stale_scheduler_lock, MAX_SCHEDULER_CYCLE_SECONDS,
+    set_scheduler_running, is_enrichment_running, reconcile_stale_scheduler_lock, MAX_SCHEDULER_CYCLE_SECONDS,
     StockUniversePersistenceError,
 )
 from core.rollup.rollup_persistence import get_metadata_freshness, RollupPersistenceError
@@ -635,6 +635,36 @@ def check_and_process(env_values):
 
     logger.info(f"Scheduler cycle starting at {fmt_datetime(now)} (ceiling date: {fmt_date(ceiling_date)}).")
 
+    # MUTUAL EXCLUSION (2026-09-19) -- the symmetric counterpart to
+    # poll_once()'s own is_scheduler_running() check in
+    # stock_universe_update_listener.py. Before this, this direction had
+    # no explicit check of its own: it relied on the incidental fact
+    # that MaintenanceModeFilter.java blocks /api/auth/login too while
+    # enrichment_running is true, so the login attempt below would fail
+    # with a generic "Scheduled maintenance is underway" -- correct
+    # behavior (the cycle does get deferred and retried), but for the
+    # wrong-sounding reason in the log, and only discoverable by reading
+    # Java-side filter code (Sashikant's report, 2026-09-19). Checking
+    # explicitly here gives an accurate, self-explanatory log line
+    # instead, and skips a login attempt that was always going to fail
+    # anyway. Fails OPEN (proceeds to login as before) on a read error,
+    # same convention as is_scheduler_running() itself -- a transient DB
+    # hiccup here must never silently stall a real bhav-copy cycle.
+    try:
+        conn = get_connection(env_values)
+        try:
+            enrichment_running = is_enrichment_running(conn)
+        finally:
+            conn.close()
+    except (DbConnectionError, StockUniversePersistenceError) as e:
+        logger.warning(f"  Could not check whether Stock Universe enrichment is running ({e}) -- proceeding anyway.")
+        enrichment_running = False
+
+    if enrichment_running:
+        logger.error("  [FAILED] Stock Universe enrichment is currently running -- deferring this cycle until it "
+                      "finishes, rather than attempting to log in (which the maintenance filter would block anyway).")
+        return False
+
     # Authenticate BEFORE entering maintenance mode -- tmt's own
     # maintenance filter checks maintenance_status on EVERY request,
     # login included, so logging in after flipping the flag would lock
@@ -1035,8 +1065,10 @@ def run():
                     _log_cycle_idle_message(cycle_id, now_after_run, sleep_seconds)
                     time.sleep(sleep_seconds)
                 else:
+                    next_retry_at = now + timedelta(seconds=CHECK_INTERVAL_SECONDS)
                     logger.error(f"  Cycle {fmt_date(cycle_id)} failed to even start -- "
-                          f"retrying in {CHECK_INTERVAL_SECONDS // 60} min, still within this same cycle's window.")
+                          f"retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at {fmt_datetime(next_retry_at)}, "
+                          f"still within this same cycle's window.")
                     time.sleep(CHECK_INTERVAL_SECONDS)
         except KeyboardInterrupt:
             logger.info("\nShutting down.")

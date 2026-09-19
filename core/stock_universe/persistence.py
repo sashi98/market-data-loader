@@ -594,6 +594,36 @@ def is_scheduler_running(conn):
     except Exception as e:
         raise StockUniversePersistenceError(f"Failed to check scheduler running status: {e}")
 
+
+def is_enrichment_running(conn):
+    """
+    Sibling of is_scheduler_running() above, ADDED 2026-09-19 -- until
+    now the mutual exclusion between bhavcopy_scheduler_main.py and this
+    listener only worked in ONE direction explicitly: the listener
+    checked is_scheduler_running() and deferred; the scheduler had no
+    equivalent check of its own and instead relied on the blunt,
+    incidental fact that MaintenanceModeFilter.java blocks its login
+    request too while enrichment_running is true (Sashikant's report,
+    2026-09-19: the scheduler's login was failing with "Scheduled
+    maintenance is underway" whenever enrichment happened to be running,
+    with no clear log line saying WHY). That achieved exclusion, but
+    with a confusing failure message and no clean way to log the real
+    reason. This lets check_and_process() ask the same direct question
+    the listener already asks of it, symmetrically, and log an accurate
+    reason before even attempting to log in.
+
+    Same fail-OPEN convention as is_scheduler_running(): a transient DB
+    hiccup here must never be allowed to silently stall the scheduler.
+    """
+    query = "SELECT enrichment_running FROM maintenance_status WHERE id = 1"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+        return bool(row[0]) if row else False
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to check enrichment running status: {e}")
+
 # Generous upper bound on how long a single scheduler cycle should ever
 # take -- STEPS 2-8 process at most one trading day's worth of
 # incremental data per exchange plus any newly-stale indicators, which
