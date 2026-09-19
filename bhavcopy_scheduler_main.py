@@ -447,6 +447,17 @@ def _indicators_pending(env_values, latest_trade_date):
     read failure, matching this file's existing fail-safe convention
     for the freshness read right above where this is called -- a
     failed check must never look like "nothing to do."
+
+    UPDATED 2026-09-20 -- now logs each indicator's own IWM freshness
+    and pending/up-to-date verdict here, one line per indicator, in the
+    same "[label] freshness: ... -- status" shape as the per-exchange
+    gap[] log right above where this is called. Previously this check
+    was silent: it returned a single bool, so the only place a user
+    ever saw WHY an indicator got activated was STEP 7's own log line
+    AFTER maintenance mode was already entered -- there was no way to
+    see, at the decision point, which indicator(s) actually justified
+    the maintenance window. This makes that reasoning visible before
+    maintenance_status is flipped on at all.
     """
     try:
         conn = get_connection(env_values)
@@ -463,7 +474,17 @@ def _indicators_pending(env_values, latest_trade_date):
     finally:
         conn.close()
 
-    return any(_own_target_stale(iwm_latest, latest_trade_date) for iwm_latest in iwm_latest_by_indicator.values())
+    pending = False
+    for indicator_id, iwm_latest in sorted(iwm_latest_by_indicator.items()):
+        if _own_target_stale(iwm_latest, latest_trade_date):
+            pending = True
+            reason = "never completed a run" if iwm_latest is None else f"behind (last computed through {fmt_date(iwm_latest)})"
+            status = f"PENDING -- {reason}; needs recompute through {fmt_date(latest_trade_date)}"
+        else:
+            status = f"up to date through {fmt_date(iwm_latest)}"
+        logger.info(f"  [{indicator_id}] indicators_workbook_metadata freshness: {status}.")
+
+    return pending
 
 
 def _activate_indicators(env_values, latest_trade_date):
@@ -726,6 +747,20 @@ def check_and_process(env_values):
         logger.info("  Nothing to process this cycle -- every exchange is already up to date and no indicator "
                      "is stale. Skipping maintenance mode entirely (no upserts needed).")
         return True
+
+    # ADDED 2026-09-20 -- state plainly, in one line, WHY maintenance mode
+    # is about to be entered, using the per-exchange/per-indicator freshness
+    # already logged above. Bhav-copy gaps and stale indicators are two
+    # independent triggers (see STEP 7's own "not gated on gap[]" note), so
+    # either alone is enough to justify the maintenance window -- this line
+    # just names which one(s) actually fired this cycle.
+    reasons = []
+    gapped_exchanges = [exchange for exchange in EXCHANGES if gap[exchange]]
+    if gapped_exchanges:
+        reasons.append(f"bhav copy gap on {', '.join(gapped_exchanges)}")
+    if indicators_pending:
+        reasons.append("one or more indicators pending (see indicators_workbook_metadata freshness above)")
+    logger.info(f"  Entering maintenance mode -- real work this cycle: {'; '.join(reasons)}.")
 
     if not _set_maintenance(env_values, True):
         logger.error("  [FAILED] Could not enter maintenance mode -- skipping this cycle rather than running unprotected.")
