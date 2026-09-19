@@ -198,16 +198,40 @@ def record_success(conn, indicator_id, trade_date):
     deletes any indicators_open_failures row for (indicator_id,
     trade_date) -- covers both the normal-success case and the
     retry-succeeded case in one place. Commits immediately.
+
+    UPDATED 2026-09-20 -- this is now an upsert (INSERT ... ON CONFLICT
+    DO UPDATE), not a bare UPDATE. A bare UPDATE silently affects 0 rows
+    when indicator_id has no IWM row yet, which is exactly what was
+    found on a real environment: indicators_workbook_metadata was
+    completely empty (0 rows, not just NULL latest_trade_date), so
+    every "successful" run was a no-op write that never actually
+    recorded anything -- STEP 7 kept treating every indicator as "never
+    completed a run" forever, no matter how many times it actually
+    completed. Root cause was a 2026-09-14 changelog decision (tmt's
+    012.01.01) to skip seeding indicators_workbook_metadata on the
+    (incorrect, even at the time) assumption that its LATEST_TRADE_DATE
+    cursor was dead code -- it had already become STEP 7's sole
+    activation signal a week earlier (2026-09-06 redesign). Rather than
+    also add a Liquibase seed changelog for this, Sashikant's own
+    confirmed call: make this write self-sufficient instead, the same
+    way indicators_open_failures below is already an upsert (ON
+    CONFLICT (indicator_id, trade_date) DO UPDATE) -- so a missing IWM
+    row (whether from a missed seed, a future new indicator_id, or a
+    row deleted by hand) heals itself on the very next successful run
+    instead of silently going nowhere forever.
     """
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE indicators_workbook_metadata
-                   SET latest_trade_date = %s, status = 'SUCCESS', date_of_run = now()
-                 WHERE indicator_id = %s
+                INSERT INTO indicators_workbook_metadata (indicator_id, latest_trade_date, status, date_of_run)
+                VALUES (%s, %s, 'SUCCESS', now())
+                ON CONFLICT (indicator_id) DO UPDATE SET
+                    latest_trade_date = EXCLUDED.latest_trade_date,
+                    status            = EXCLUDED.status,
+                    date_of_run       = EXCLUDED.date_of_run
                 """,
-                (trade_date, indicator_id),
+                (indicator_id, trade_date),
             )
             cur.execute(
                 "DELETE FROM indicators_open_failures WHERE indicator_id = %s AND trade_date = %s",
