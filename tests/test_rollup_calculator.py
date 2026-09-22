@@ -35,8 +35,11 @@ def check(label, condition):
 
 def row(isin, exchange, series, symbol, trade_date, open_, high, low, close, last,
         tot_trd_qty, tot_trd_val, total_trades):
+    # security_id is the rollup's grouping key (core/rollup/rollup_calculator.py
+    # repointed from isin on 2026-08-26); fixture isins are "INE<n>", so <n>
+    # doubles as a stable per-security id.
     return {
-        "isin": isin, "exchange": exchange, "series": series, "symbol": symbol,
+        "security_id": int(isin[3:]), "isin": isin, "exchange": exchange, "series": series, "symbol": symbol,
         "trade_date": trade_date, "open": open_, "high": high, "low": low,
         "close": close, "last": last, "tot_trd_qty": tot_trd_qty,
         "tot_trd_val": tot_trd_val, "total_trades": total_trades,
@@ -129,7 +132,7 @@ def test_weekly_rollup_prevclose_chaining():
     result = compute_rollup(df, WEEKLY)
     check("two distinct weekly rows", len(result) == 2)
     week1, week2 = result.iloc[0], result.iloc[1]
-    check("week1 prevClose is NULL (isin's first period, no prior at all)", pd.isna(week1["prev_close"]))
+    check("week1 prevClose is NULL (security's first period, no prior at all)", pd.isna(week1["prev_close"]))
     check("week2 prevClose == week1's close (prior PERIOD's close, not week2's own first day)",
           week2["prev_close"] == 118)
     check("week2 ltp_percent_change matches close vs prevClose",
@@ -148,7 +151,7 @@ def test_prior_close_lookup_for_incremental_single_period():
     df = pd.DataFrame([
         row("INE1", "NSE", "EQ", "FOO", date(2026, 8, 24), 119, 125, 115, 122, 122, 1500, 150000, 55),
     ])
-    lookup = {("INE1", "NSE", date(2026, 8, 24)): 118}
+    lookup = {(1, "NSE", date(2026, 8, 24)): 118}
     result = compute_rollup(df, WEEKLY, prior_close_lookup=lookup)
     check("prevClose resolved from the lookup", result.iloc[0]["prev_close"] == 118)
 
@@ -181,9 +184,9 @@ def test_multiple_isins_independent():
         row("INE1", "BSE", "EQ", "FOO", date(2026, 8, 17), 101, 111, 96, 106, 106, 900, 90000, 45),
     ])
     result = compute_rollup(df, WEEKLY)
-    check("3 independent (isin, exchange) rollup rows", len(result) == 3)
+    check("3 independent (security_id, exchange) rollup rows", len(result) == 3)
     check("INE1/NSE and INE1/BSE are separate rows (not merged)",
-          len(result[(result["isin"] == "INE1")]) == 2)
+          len(result[(result["security_id"] == 1)]) == 2)
 
 
 def test_empty_input():
@@ -191,7 +194,7 @@ def test_empty_input():
     print("  compute_rollup() -- empty input")
     print("=" * 60)
     empty = pd.DataFrame(columns=[
-        "isin", "exchange", "series", "symbol", "trade_date",
+        "security_id", "isin", "exchange", "series", "symbol", "trade_date",
         "open", "high", "low", "close", "last", "tot_trd_qty", "tot_trd_val", "total_trades",
     ])
     result = compute_rollup(empty, WEEKLY)
