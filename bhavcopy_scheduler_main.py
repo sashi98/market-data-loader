@@ -174,6 +174,7 @@
 # 16:00 open, not 15 minutes later.
 
 import argparse
+import concurrent.futures
 import json
 import sys
 import time
@@ -542,15 +543,24 @@ def _activate_indicators(env_values, latest_trade_date):
 
 def _run_indicator(env_values, indicator_id, start_date, end_date):
     """
-    STEP 8 -- called once per activated indicator, in order, from a
-    plain sequential loop (no threads -- an earlier threaded version had
-    several MA/RSI runners activate together and each pull an unbounded
-    multi-million-row fetch into memory at once, which crashed Postgres;
-    once every runner's own fetch became properly bounded/chunked, a
-    thread pool that only ever ran one worker at a time added nothing
-    but complexity). Opens its own connection per call so one
-    indicator's dead/rolled-back connection never leaks into the next
-    indicator's call.
+    STEP 8 -- called once per activated indicator, from a
+    ThreadPoolExecutor(max_workers=2) (TMT-MDL-US-0001, 2026-09-22) -- up
+    to 2 indicator runners execute concurrently, not the fully sequential
+    loop this used to be. Opens its own connection per call so each
+    indicator's connection (and any dead/rolled-back state) is isolated
+    from every other indicator's, whether running before, after, or
+    alongside it.
+
+    History: an earlier fully-concurrent version (all activated
+    indicators at once) crashed Postgres -- several MA/RSI runners each
+    pulling an unbounded multi-million-row fetch into memory
+    simultaneously -- so this was made fully sequential
+    (max_workers=1-equivalent, a plain for loop) once STEP 4's own fetch
+    became bounded/chunked. max_workers=2 here is a deliberate, modest
+    step back up, not "no limit": fetch_closes_for_ma() (rsi14w/rsi14m's
+    own full-history fetch) is still unbounded/unchunked as of this
+    change (see pending-dev-tasks.md), so pushing this much higher
+    without chunking that too could reintroduce the original OOM risk.
 
     Every runner dispatched from here already does a full blind
     recompute of BOTH exchanges (loops EXCHANGES internally) with no
@@ -840,11 +850,27 @@ def check_and_process(env_values):
         logger.info("\nSTEP 7 -- Indicators Registry Update")
         activated_indicators = _activate_indicators(env_values, latest_trade_date)
 
-        # STEP 8 -- Indicator Runner Loop.
+        # STEP 8 -- Indicator Runner Loop. One thread per activated
+        # indicator, at most 2 running concurrently (TMT-MDL-US-0001) --
+        # see _run_indicator()'s own docstring for the full history/
+        # reasoning. executor.submit() up front for every activated
+        # indicator, same "everyone queued immediately, the pool's own
+        # worker count throttles how many actually run at once" shape
+        # the original max_workers=1 design already used.
         if activated_indicators:
             logger.info("\nSTEP 8 -- Indicator Runner Loop")
-            for indicator_id in activated_indicators:
-                _run_indicator(env_values, indicator_id, DEFAULT_START_DATE, latest_trade_date)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [
+                    executor.submit(_run_indicator, env_values, indicator_id, DEFAULT_START_DATE, latest_trade_date)
+                    for indicator_id in activated_indicators
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    # _run_indicator() already catches and logs every
+                    # exception itself so one indicator's runner can't
+                    # take any other down -- this just surfaces anything
+                    # that somehow escaped that handling instead of
+                    # swallowing it silently.
+                    future.result()
 
         cycle_summary = {
             "ceiling_date": ceiling_date,
