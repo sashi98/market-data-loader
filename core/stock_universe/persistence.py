@@ -624,6 +624,117 @@ def is_enrichment_running(conn):
     except Exception as e:
         raise StockUniversePersistenceError(f"Failed to check enrichment running status: {e}")
 
+
+def get_scheduler_cycle_state(conn):
+    """
+    TMT-MDL-BUG-0002 (2026-09-22) -- reads bhavcopy_scheduler_main.py's
+    own "which cycle did I last finish, and when do I next intend to
+    wake up" state from the maintenance_status singleton row (id=1),
+    replacing the old local .scheduler_cycle_state.json file. See that
+    file's migration (017.01.00) for why: the scheduler's container
+    filesystem isn't a mounted volume, so the JSON file was silently
+    wiped on every Docker redeploy, defeating the whole point of
+    persisting it.
+
+    Returns (scheduler_last_cycle_completed_at, scheduler_next_run_at)
+    as a (datetime | None, datetime | None) pair -- both None if the
+    scheduler has never completed a cycle or recorded a next-run time
+    yet (a fresh DB, or a fresh row). The caller derives that cycle's
+    own cycle_id from scheduler_last_cycle_completed_at via
+    _cycle_id_for(), exactly as it used to derive it from the JSON
+    file's own last_completed_cycle_date -- the two are equivalent
+    because a cycle's completion timestamp always falls inside that
+    same cycle's own window.
+
+    Raises StockUniversePersistenceError on a genuine read failure
+    (connection problem, unexpected schema) -- unlike is_scheduler_running()/
+    is_enrichment_running()'s fail-OPEN convention, because there is no
+    safe default to fail open TO here (guessing wrong risks either a
+    duplicate cycle run or a skipped one); the caller (run()'s startup)
+    catches this the same way it already catches a failure to reconcile
+    the stale scheduler lock, and falls back to treating it as "no
+    prior state on record" rather than crashing the whole process.
+    """
+    query = "SELECT scheduler_last_cycle_completed_at, scheduler_next_run_at FROM maintenance_status WHERE id = 1"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query)
+            row = cur.fetchone()
+        if not row:
+            return None, None
+        return row[0], row[1]
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to read scheduler cycle state: {e}")
+
+
+def set_scheduler_last_cycle_completed_at(conn, completed_at):
+    """
+    Sibling write for get_scheduler_cycle_state() above -- called ONLY
+    from run()'s success branch, right after check_and_process() returns
+    True for a given cycle, exactly mirroring the old
+    _save_last_completed_cycle_id()'s call site. Deliberately a separate
+    UPDATE from set_scheduler_next_run_at() (called right alongside it
+    at that same call site) rather than one combined statement, because
+    set_scheduler_next_run_at() alone is also called from three OTHER
+    call sites in run()'s loop (the dead-zone sleep, the already-done-
+    this-cycle skip, and the failed-cycle retry) that must NEVER touch
+    this column -- see that function's own docstring for why.
+    """
+    query = """
+        UPDATE maintenance_status
+           SET scheduler_last_cycle_completed_at = %(v)s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = 1
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, {"v": completed_at})
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise StockUniversePersistenceError(f"Failed to record scheduler cycle completion: {e}")
+
+
+def set_scheduler_next_run_at(conn, next_run_at):
+    """
+    Records "the next time this process will wake up and do anything at
+    all" -- purely informational/observability state, read by nothing
+    in this codebase yet but intended for an eventual admin/NavBar
+    display of the scheduler's next expected run, same spirit as
+    MaintenanceIndicator already showing is_running/started_at.
+
+    TMT-MDL-BUG-0002 (2026-09-22) -- Sashikant's own concern, raised
+    while this migration was being designed: "if schedular encounters
+    error next run time will not be populated". Resolved by calling
+    this from EVERY sleep branch in run()'s loop, not just the
+    successful-cycle one -- the dead-zone sleep, the already-done-this-
+    cycle skip, the successful-cycle idle sleep, AND the failed-cycle
+    retry sleep all call this with whatever timestamp they are actually
+    about to sleep until. That makes this column always answer "when
+    will this process next attempt something", full stop -- a retry
+    time during a string of failures is just as much "the next run" as
+    a legitimate AMH/BMH window open, and a stale value sitting there
+    across an ongoing outage would be actively misleading to whoever is
+    watching it. scheduler_last_cycle_completed_at (the sibling column,
+    written only by set_scheduler_last_cycle_completed_at() above) is
+    what still answers "did the scheduler actually get anything done",
+    and that one is deliberately left untouched on failure.
+    """
+    query = """
+        UPDATE maintenance_status
+           SET scheduler_next_run_at = %(v)s,
+               updated_at = CURRENT_TIMESTAMP
+         WHERE id = 1
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, {"v": next_run_at})
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise StockUniversePersistenceError(f"Failed to record scheduler next-run time: {e}")
+
+
 # Generous upper bound on how long a single scheduler cycle should ever
 # take -- STEPS 2-8 process at most one trading day's worth of
 # incremental data per exchange plus any newly-stale indicators, which

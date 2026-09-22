@@ -138,12 +138,31 @@
 # however many days were missed (STEP 2's own date-range logic already
 # bridges multi-day gaps automatically, unaffected by this change). A
 # cycle is identified by the calendar date of its own 16:00 AMH start;
-# "have I already run THIS cycle" is tracked in a small local state file
-# (SCHEDULER_STATE_FILE_PATH) -- not the DB -- specifically so it
-# survives the whole process restarting, without needing a Liquibase
-# migration coordinated with the Java app for something this
-# scheduler-internal. See _cycle_id_for()/_load_last_completed_cycle_id()/
-# _save_last_completed_cycle_id() and run()'s own loop for the mechanics.
+# "have I already run THIS cycle" was originally tracked in a small
+# local state file (SCHEDULER_STATE_FILE_PATH) -- not the DB --
+# specifically so it survives the whole process restarting, without
+# needing a Liquibase migration coordinated with the Java app for
+# something this scheduler-internal.
+#
+# TMT-MDL-BUG-0002 (2026-09-22) -- that file-based reasoning held for a
+# bare-metal/systemd restart, but not for a Docker redeploy: the
+# mdl-scheduler container's app directory is baked into the image at
+# `docker build` time and is NOT a mounted volume, so replacing the
+# container (any deploy that rebuilds the image) silently wiped the
+# file, and a fresh container -- having no memory of a cycle that
+# already completed earlier that same evening -- started a whole
+# redundant second cycle. Moved this one piece of state into the
+# existing maintenance_status singleton row instead (Sashikant's own
+# call, in preference to relocating the file into an already-mounted
+# directory) -- see migration 017.01.00, get_scheduler_cycle_state()/
+# set_scheduler_last_cycle_completed_at()/set_scheduler_next_run_at()
+# in core/stock_universe/persistence.py, and _cycle_id_for()/
+# _load_last_completed_cycle_id()/_save_last_completed_cycle_id()/
+# _update_scheduler_next_run_at() and run()'s own loop below for the
+# mechanics. scheduler_next_run_at is deliberately updated from EVERY
+# sleep branch in that loop, including the failed-cycle retry one, not
+# just the successful-cycle one -- see set_scheduler_next_run_at()'s
+# own docstring for why.
 #
 # MODULARIZED 2026-08-30 (fifth pass) -- STEPS 2-6 used to be one shared
 # module (runners/price_actions/bhavcopy_listener.py's own
@@ -175,7 +194,6 @@
 
 import argparse
 import concurrent.futures
-import json
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -192,6 +210,7 @@ from core.indicators.persistence import (
 )
 from core.stock_universe.persistence import (
     set_scheduler_running, is_enrichment_running, reconcile_stale_scheduler_lock, MAX_SCHEDULER_CYCLE_SECONDS,
+    get_scheduler_cycle_state, set_scheduler_last_cycle_completed_at, set_scheduler_next_run_at,
     StockUniversePersistenceError,
 )
 from core.rollup.rollup_persistence import get_metadata_freshness, RollupPersistenceError
@@ -218,11 +237,6 @@ WINDOW_END_HOUR_IST = 9
 WINDOW_END_MINUTE_IST = 0
 
 CHECK_INTERVAL_SECONDS = 900
-
-# Local file tracking which cycle was last successfully run -- see this
-# file's own header ("ONCE-PER-CYCLE") for why this is a local file, not
-# a DB table. Stores {"last_completed_cycle_date": "YYYY-MM-DD"}.
-SCHEDULER_STATE_FILE_PATH = Path(__file__).resolve().parent / ".scheduler_cycle_state.json"
 
 EXCHANGES = ["NSE", "BSE"]
 
@@ -293,27 +307,88 @@ def _seconds_until_next_window_open(now):
     return max((next_open - now).total_seconds(), 0)
 
 
-def _load_last_completed_cycle_id():
+def _load_last_completed_cycle_id(env_values):
     """
-    Returns the date of the last cycle this process (or a prior run of
-    it, possibly days ago) successfully completed, or None if the state
-    file doesn't exist yet or is unreadable/corrupt.
+    TMT-MDL-BUG-0002 (2026-09-22) -- replaces the old local-JSON-file
+    version of this function. Reads scheduler_last_cycle_completed_at
+    from the maintenance_status DB row (see get_scheduler_cycle_state())
+    and derives that cycle's own cycle_id from it via _cycle_id_for(),
+    the same date-of-the-cycle's-own-16:00-AMH-start identity the file
+    used to store directly -- valid because a cycle's completion always
+    falls inside that same cycle's own window.
+
+    Returns None if the scheduler has never completed a cycle yet, OR
+    if the DB can't be reached right now -- deliberately fail-soft here
+    (same as the old file's FileNotFoundError/corrupt-JSON handling),
+    logging a warning rather than crashing startup, since worst case a
+    transient failure here just means today's cycle runs once more than
+    strictly necessary, not that it's skipped.
     """
     try:
-        with open(SCHEDULER_STATE_FILE_PATH, "r") as f:
-            data = json.load(f)
-        return datetime.strptime(data["last_completed_cycle_date"], "%Y-%m-%d").date()
-    except (FileNotFoundError, json.JSONDecodeError, KeyError, ValueError):
+        conn = get_connection(env_values)
+        try:
+            last_completed_at, _ = get_scheduler_cycle_state(conn)
+        finally:
+            conn.close()
+    except (DbConnectionError, StockUniversePersistenceError) as e:
+        logger.warning(f"  [WARN] Could not read scheduler cycle state from the DB: {e} -- "
+              f"treating as no prior completed cycle on record.")
         return None
+    if last_completed_at is None:
+        return None
+    return _cycle_id_for(last_completed_at)
 
 
-def _save_last_completed_cycle_id(cycle_id):
+def _save_last_completed_cycle_id(env_values, cycle_id):
+    """
+    TMT-MDL-BUG-0002 (2026-09-22) -- DB-backed replacement for the old
+    file write. Only ever called from run()'s success branch (mirroring
+    the old call site exactly) with the timestamp of the moment the
+    cycle actually finished -- NOT cycle_id itself, since the column is
+    a TIMESTAMP (scheduler_last_cycle_completed_at), not a DATE; the
+    caller reconstructs cycle_id back out of it via _cycle_id_for() the
+    next time _load_last_completed_cycle_id() runs.
+
+    A write failure here is logged, not raised -- same "if this process
+    restarts before the next cycle, it may re-run this one" tradeoff the
+    old file version accepted, now just DB-flavored instead of disk-
+    flavored.
+    """
     try:
-        with open(SCHEDULER_STATE_FILE_PATH, "w") as f:
-            json.dump({"last_completed_cycle_date": cycle_id.strftime("%Y-%m-%d")}, f)
-    except OSError as e:
-        logger.warning(f"  [WARN] Could not persist cycle-state file ({SCHEDULER_STATE_FILE_PATH}): {e} -- "
+        conn = get_connection(env_values)
+        try:
+            set_scheduler_last_cycle_completed_at(conn, datetime.now(IST))
+        finally:
+            conn.close()
+    except (DbConnectionError, StockUniversePersistenceError) as e:
+        logger.warning(f"  [WARN] Could not persist scheduler cycle completion to the DB: {e} -- "
               f"if this process restarts before the next cycle, it may re-run this one.")
+
+
+def _update_scheduler_next_run_at(env_values, next_run_at):
+    """
+    TMT-MDL-BUG-0002 (2026-09-22) -- called from EVERY sleep branch in
+    run()'s loop (dead-zone, already-done-this-cycle skip, successful-
+    cycle idle sleep, AND failed-cycle retry) so scheduler_next_run_at
+    always reflects the actual next wake-up time, whatever kind of sleep
+    it is -- see set_scheduler_next_run_at()'s own docstring for why
+    this must not be limited to the success path (Sashikant's own
+    concern: "if schedular encounters error next run time will not be
+    populated").
+
+    Best-effort/non-fatal like the functions above -- this column is
+    observability, not correctness-critical state, so a DB hiccup here
+    logs a warning and lets the scheduler keep running rather than
+    blocking or crashing on it.
+    """
+    try:
+        conn = get_connection(env_values)
+        try:
+            set_scheduler_next_run_at(conn, next_run_at)
+        finally:
+            conn.close()
+    except (DbConnectionError, StockUniversePersistenceError) as e:
+        logger.warning(f"  [WARN] Could not persist scheduler next-run time to the DB: {e}")
 
 
 def _ceiling_date(now):
@@ -1086,13 +1161,13 @@ def run():
             if ran_ok:
                 cycle_id = _cycle_id_for(datetime.now(IST))
                 if cycle_id is not None:
-                    _save_last_completed_cycle_id(cycle_id)
+                    _save_last_completed_cycle_id(env_values, cycle_id)
             return
 
         logger.info(f"Bhavcopy scheduler starting -- ONE run per cycle (16:00-09:00 IST next day), "
               f"retrying every {CHECK_INTERVAL_SECONDS // 60} min only if a cycle fails to even start. "
               f"Ctrl+C to stop.")
-        last_completed_cycle_id = _load_last_completed_cycle_id()
+        last_completed_cycle_id = _load_last_completed_cycle_id(env_values)
         if last_completed_cycle_id is not None:
             logger.info(f"  Last completed cycle on record: {fmt_date(last_completed_cycle_id)}.")
         try:
@@ -1102,6 +1177,8 @@ def run():
 
                 if cycle_id is None:
                     sleep_seconds = _seconds_until_next_window_open(now)
+                    next_run_at = now + timedelta(seconds=sleep_seconds)
+                    _update_scheduler_next_run_at(env_values, next_run_at)
                     logger.info(f"  Between cycles (this morning's 09:00 close, today's 16:00 open) -- sleeping "
                           f"{round(sleep_seconds / 60, 1)} min.")
                     time.sleep(sleep_seconds)
@@ -1109,6 +1186,8 @@ def run():
 
                 if cycle_id == last_completed_cycle_id:
                     sleep_seconds = _seconds_until_next_window_open(now)
+                    next_run_at = now + timedelta(seconds=sleep_seconds)
+                    _update_scheduler_next_run_at(env_values, next_run_at)
                     _log_cycle_idle_message(cycle_id, now, sleep_seconds)
                     time.sleep(sleep_seconds)
                     continue
@@ -1120,13 +1199,23 @@ def run():
 
                 if ran_ok:
                     last_completed_cycle_id = cycle_id
-                    _save_last_completed_cycle_id(cycle_id)
+                    _save_last_completed_cycle_id(env_values, cycle_id)
                     now_after_run = datetime.now(IST)
                     sleep_seconds = _seconds_until_next_window_open(now_after_run)
+                    next_run_at = now_after_run + timedelta(seconds=sleep_seconds)
+                    _update_scheduler_next_run_at(env_values, next_run_at)
                     _log_cycle_idle_message(cycle_id, now_after_run, sleep_seconds)
                     time.sleep(sleep_seconds)
                 else:
                     next_retry_at = now + timedelta(seconds=CHECK_INTERVAL_SECONDS)
+                    # TMT-MDL-BUG-0002 (2026-09-22) -- unlike
+                    # last_completed_cycle_id (untouched here, since the
+                    # cycle genuinely did NOT complete), scheduler_next_run_at
+                    # IS updated on this failure path too, to the retry
+                    # time -- see set_scheduler_next_run_at()'s own
+                    # docstring for why a stale value here would be
+                    # actively misleading during an ongoing outage.
+                    _update_scheduler_next_run_at(env_values, next_retry_at)
                     logger.error(f"  Cycle {fmt_date(cycle_id)} failed to even start -- "
                           f"retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at {fmt_datetime(next_retry_at)}, "
                           f"still within this same cycle's window.")
