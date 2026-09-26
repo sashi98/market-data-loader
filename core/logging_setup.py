@@ -52,31 +52,22 @@
 
 import logging
 import sys
-import warnings
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-# TMT-MDL-BUG-0003 (2026-09-24) -- pandas' pd.read_sql() emits this exact
-# UserWarning on EVERY call made with a raw DBAPI2 connection (rather than
-# a SQLAlchemy engine/connection) -- and this codebase deliberately uses
-# raw psycopg2 connections everywhere (core/db_client.py), never
-# SQLAlchemy, so the warning is a known, permanent tradeoff, not
-# per-call-actionable. Across core/ma/ma_persistence.py, core/rsi/*,
-# core/rollup/rollup_persistence.py, core/price_series/adjusted_series.py
-# etc., a single scheduler cycle calls pd.read_sql() dozens of times,
-# flooding the console/log file with the identical warning back-to-back
-# (Sashikant, 2026-09-24). action="once" (not "ignore") so it still
-# surfaces exactly once per process run -- for anyone reading the log who
-# doesn't already know about this tradeoff -- rather than being fully
-# silenced. Registered at import time (not inside start_run_logging()
-# below) so it's in effect no matter which entry point imports this
-# module first.
-warnings.filterwarnings(
-    "once",
-    message=r"pandas only supports SQLAlchemy connectable.*",
-    category=UserWarning,
-)
+# TMT-MDL-BUG-0003 (2026-09-24) originally registered a warnings filter for
+# pandas' "pandas only supports SQLAlchemy connectable..." UserWarning here
+# (action="once", to surface it a single time per process rather than
+# flooding the log on every pd.read_sql() call against a raw psycopg2
+# connection). That registration was duplicated in core/db_client.py and,
+# per Sashikant 2026-09-26, "once" wasn't actually deduping under this
+# scheduler's concurrent indicator execution (ThreadPoolExecutor -- see
+# _run_indicator() in bhavcopy_scheduler_main.py) -- CPython's "once"
+# bookkeeping isn't safe against concurrent threads warning at the same
+# moment. The fix (switched to action="ignore", which doesn't need any
+# racy shared state) now lives solely in core/db_client.py, the module
+# that actually owns the raw-connection tradeoff -- see the comment there.
 
 # core/logging_setup.py -> core/ -> market-data-loader/ -> app/ -> track-my-trade/
 LOGS_DIR = Path(__file__).resolve().parent.parent.parent.parent / "logs" / "market-data-loader"

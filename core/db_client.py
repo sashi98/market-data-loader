@@ -25,19 +25,33 @@ JDBC_PREFIX = "jdbc:"
 # reacts to that on every single read_sql() call with:
 #   UserWarning: pandas only supports SQLAlchemy connectable (engine/
 #   connection) or database string URI or sqlite3 DBAPI2 connection...
-# which is harmless (psycopg2 is a fully-supported DBAPI2 connection) but,
-# left at Python's default per-call-site "default" filter, floods any log
-# with dozens of near-identical copies -- one per read_sql() call across
-# every module, every run. Registered here (module-scope, so it fires once
-# at first import of this shared connection helper, before any caller can
-# reach read_sql()) with action="once": Python prints the FIRST occurrence
-# of this exact warning once per process and silently drops every repeat
-# after that, regardless of which file/line triggers it -- so the signal
-# ("you're on a raw DBAPI2 connection, that's fine, here's why pandas
-# mentions it") survives once per run without drowning out everything else.
+# which is harmless (psycopg2 is a fully-supported DBAPI2 connection).
+#
+# TMT-MDL-BUG-0003 (2026-09-24) first tried action="once" here (and,
+# separately/redundantly, in core/logging_setup.py) to print this exactly
+# once per process instead of flooding the log. That did NOT fully work
+# (Sashikant, 2026-09-26 -- still saw 4+ repeats in one run) because
+# _run_indicator() is fan-out across concurrent worker threads via
+# ThreadPoolExecutor(max_workers=2) in bhavcopy_scheduler_main.py
+# (TMT-MDL-US-0001) -- CPython's warnings "once" bookkeeping is a plain,
+# unlocked dict (the global onceregistry), so two threads hitting
+# read_sql() at nearly the same moment can each see "not yet warned" and
+# both print before either updates the registry. That's exactly the
+# pattern in the reported log (multiple copies of the identical warning,
+# including duplicates from the SAME call site).
+#
+# Fixed here by switching to action="ignore": the filter list itself is
+# only written once, at import time, before any indicator threads exist,
+# so every later read (from any thread) is a race-free lookup against an
+# already-settled filter list -- no shared mutable "have I warned yet?"
+# state to race on. This fully and permanently silences the warning
+# (rather than surfacing it once) -- if a "prints once per process" notice
+# is wanted instead, it needs its own explicit one-time log line (with a
+# lock) rather than relying on warnings' own "once" action, which isn't
+# safe under this codebase's concurrent indicator execution.
 warnings.filterwarnings(
-    "once",
-    message="pandas only supports SQLAlchemy connectable",
+    "ignore",
+    message=r"pandas only supports SQLAlchemy connectable.*",
     category=UserWarning,
 )
 
