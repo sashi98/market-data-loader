@@ -134,6 +134,10 @@ from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_D
 from core.stock_universe.tradingview_client import fetch_fundamentals_tradingview, TRADINGVIEW_COVERABLE_FIELDS
 from core.stock_universe.nse_client import fetch_fundamentals_nse, NseExcluded
 from core.stock_universe.bse_client import fetch_fundamentals_bse, BseExcluded
+from core.stock_universe.taxonomy import (
+    TaxonomyMaps, taxonomy_fields, OFFICIAL_SOURCES,
+    SOURCE_NSE, SOURCE_BSE, SOURCE_TRADINGVIEW, SOURCE_YFINANCE,
+)
 
 import logging
 
@@ -221,26 +225,31 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
     independent of whatever happens on the BSE side. Official API wins
     for any field both sources provide.
 
-    Returns (fields, excluded, source_notes) -- excluded=True means
-    NSE's own isDelisted flag says this row should not be written at
-    all; fields will be {} in that case. Sleeps
+    Returns (fields, excluded, source_notes, taxonomy_source) -- excluded=True
+    means NSE's own isDelisted flag says this row should not be written at
+    all; fields will be {} in that case. taxonomy_source (TMT-US-0010) is
+    the tier that supplied the sector (SOURCE_NSE / SOURCE_YFINANCE /
+    SOURCE_TRADINGVIEW), None when no tier did. Sleeps
     RATE_LIMIT_DELAY_SECONDS after each request it makes.
     """
     fields = {}
     source_notes = []
+    taxonomy_source = None
 
     try:
         nse_fields = fetch_fundamentals_nse(nse_session, nse_symbol, nse_exchange)
         if nse_fields:
             fields.update(nse_fields)
             source_notes.append(f"NSE:{nse_symbol}")
+            if nse_fields.get("sector"):
+                taxonomy_source = SOURCE_NSE
     except NseExcluded as e:
         logger.info(f"  [EXCLUDED] {isin_number} NSE-side (NSE={nse_symbol}) -- {e}")
         with results_lock:
             results["excluded"] += 1
         _record_audit(results, results_lock, isin_number, nse_exchange, "EXCLUDED", str(e))
         time.sleep(RATE_LIMIT_DELAY_SECONDS)
-        return {}, True, []
+        return {}, True, [], None
     time.sleep(RATE_LIMIT_DELAY_SECONDS)
 
     yf_ticker = f"{nse_symbol}.NS"
@@ -271,6 +280,8 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
         for k, v in yf_fields.items():
             fields.setdefault(k, v)
         source_notes.append(f"yf:{yf_ticker}")
+        if taxonomy_source is None and fields.get("sector"):
+            taxonomy_source = SOURCE_YFINANCE
     time.sleep(RATE_LIMIT_DELAY_SECONDS)
 
     # CONFIRMED REAL gap this fixes: REXPIPES (NSE SME) got 6 fields
@@ -300,9 +311,11 @@ def _resolve_nse_side(nse_session, isin_number, nse_symbol, nse_exchange, result
                     filled.append(k)
             if filled:
                 source_notes.append(f"TradingView:NSE:{nse_symbol}(gap-fill:{','.join(filled)})")
+                if "sector" in filled and fields.get("sector"):
+                    taxonomy_source = SOURCE_TRADINGVIEW
         time.sleep(RATE_LIMIT_DELAY_SECONDS)
 
-    return fields, False, source_notes
+    return fields, False, source_notes, taxonomy_source
 
 
 def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_security_code, results, results_lock):
@@ -321,7 +334,8 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
     missing on this side, rather than risk populating it with
     confidently wrong data.
 
-    Returns (fields, excluded, source_notes) -- excluded=True means
+    Returns (fields, excluded, source_notes, taxonomy_source) -- see
+    _resolve_nse_side for taxonomy_source. excluded=True means
     BSE's own IShow flag says this security isn't a real equity
     (confirmed to correlate with debt instruments -- see bse_client.py's
     own header comment); fields will be {} in that case, and yfinance
@@ -330,12 +344,15 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
     """
     fields = {}
     source_notes = []
+    taxonomy_source = None
 
     try:
         bse_fields, bse_index_value = fetch_fundamentals_bse(bse_session, bse_security_code)
         if bse_fields:
             fields.update(bse_fields)
             source_notes.append(f"BSE:{bse_security_code}")
+            if bse_fields.get("sector"):
+                taxonomy_source = SOURCE_BSE
         if bse_index_value:
             fields.setdefault("index_list", [bse_index_value])
     except BseExcluded as e:
@@ -344,7 +361,7 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
             results["excluded"] += 1
         _record_audit(results, results_lock, isin_number, bse_exchange, "EXCLUDED", str(e))
         time.sleep(RATE_LIMIT_DELAY_SECONDS)
-        return {}, True, []
+        return {}, True, [], None
     except Exception as e:
         logger.error(f"  [BSE tier failed] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
     time.sleep(RATE_LIMIT_DELAY_SECONDS)
@@ -368,12 +385,14 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
         for k, v in yf_fields.items():
             fields.setdefault(k, v)
         source_notes.append(f"yf:{yf_ticker}")
+        if taxonomy_source is None and fields.get("sector"):
+            taxonomy_source = SOURCE_YFINANCE
     time.sleep(RATE_LIMIT_DELAY_SECONDS)
 
-    return fields, False, source_notes
+    return fields, False, source_notes, taxonomy_source
 
 
-def _worker(env_values, work_queue, results_lock, results):
+def _worker(env_values, work_queue, results_lock, results, taxonomy_maps):
     """
     Pulls (isin_number, nse_symbol, nse_exchange, bse_symbol, bse_exchange,
     bse_security_code) items off the shared queue until it's empty. Opens
@@ -391,6 +410,10 @@ def _worker(env_values, work_queue, results_lock, results):
     line and its own contribution to results["enriched"]/["failed"].
     See this file's header comment for the full reasoning behind why
     the two sides are never merged.
+
+    taxonomy_maps (TMT-US-0010) is the run's shared sector / industry maps:
+    each side's details get their sector / industry keys and display names
+    from it just before they are written.
     """
     try:
         conn = get_connection(env_values)
@@ -416,11 +439,16 @@ def _worker(env_values, work_queue, results_lock, results):
                 # this file's header comment for why those 4 fields
                 # specifically are a deliberate exception.
                 nse_side_fields_for_sharing = {}
+                # TMT-US-0010: which tier gave the NSE row its sector, and whether that row may still take the
+                # official BSE sector of the same ISIN (see the sharing step after the BSE side).
+                nse_taxonomy_source = None
+                nse_row_shareable = False
                 if nse_symbol:
                     try:
-                        nse_side_fields, excluded, source_notes = _resolve_nse_side(
+                        nse_side_fields, excluded, source_notes, nse_taxonomy_source = _resolve_nse_side(
                             nse_session, isin_number, nse_symbol, nse_exchange, results, results_lock
                         )
+                        nse_row_shareable = not excluded
                         if excluded:
                             pass  # already logged and counted inside _resolve_nse_side
                         elif not nse_side_fields:
@@ -431,6 +459,7 @@ def _worker(env_values, work_queue, results_lock, results):
                                           "No fields returned from NSE official API or yfinance")
                         else:
                             nse_side_fields = {k: normalize_field_value(v) for k, v in nse_side_fields.items()}
+                            nse_side_fields = taxonomy_maps.apply(conn, isin_number, nse_exchange, nse_side_fields)
                             dropped = update_stock_fundamentals(conn, isin_number, nse_exchange, nse_side_fields)
                             conn.commit()
 
@@ -458,6 +487,7 @@ def _worker(env_values, work_queue, results_lock, results):
                                     results["enriched"] += 1
                     except StockUniversePersistenceError as e:
                         conn.rollback()
+                        nse_row_shareable = False
                         logger.error(f"  [FAILED] {isin_number} NSE-side -- DB write failed: {e}")
                         with results_lock:
                             results["failed"] += 1
@@ -475,7 +505,7 @@ def _worker(env_values, work_queue, results_lock, results):
                 # writing.
                 if bse_security_code:
                     try:
-                        bse_side_fields, excluded, source_notes = _resolve_bse_side(
+                        bse_side_fields, excluded, source_notes, bse_taxonomy_source = _resolve_bse_side(
                             bse_session, isin_number, bse_symbol, bse_exchange, bse_security_code, results, results_lock
                         )
 
@@ -498,6 +528,7 @@ def _worker(env_values, work_queue, results_lock, results):
                                               "No fields returned from BSE official API or yfinance")
                             else:
                                 bse_side_fields = {k: normalize_field_value(v) for k, v in bse_side_fields.items()}
+                                bse_side_fields = taxonomy_maps.apply(conn, isin_number, bse_exchange, bse_side_fields)
                                 dropped = update_stock_fundamentals(conn, isin_number, bse_exchange, bse_side_fields)
                                 conn.commit()
 
@@ -522,6 +553,21 @@ def _worker(env_values, work_queue, results_lock, results):
                                           f"{len(written_fields)} field(s) written{dropped_note}: {written_fields}")
                                     with results_lock:
                                         results["enriched"] += 1
+
+                                    # TMT-US-0010: same company, same official taxonomy -- an NSE row whose
+                                    # sector came from Yahoo / TradingView (or from nowhere) takes the
+                                    # official BSE sector / industry of this ISIN instead.
+                                    if (nse_symbol and nse_row_shareable
+                                            and nse_taxonomy_source not in OFFICIAL_SOURCES
+                                            and bse_taxonomy_source == SOURCE_BSE
+                                            and written_fields.get("sector_key")):
+                                        shared = taxonomy_fields(written_fields)
+                                        update_stock_fundamentals(conn, isin_number, nse_exchange, shared)
+                                        conn.commit()
+                                        was = nse_side_fields_for_sharing.get("sector")
+                                        logger.info(f"  [SECTOR SHARED] {isin_number} NSE-side <- BSE:{bse_security_code} -- "
+                                              f"sector={shared.get('sector')!r}, industry={shared.get('industry')!r} "
+                                              f"(was {was!r} from {nse_taxonomy_source or 'no source'})")
                     except StockUniversePersistenceError as e:
                         conn.rollback()
                         logger.error(f"  [FAILED] {isin_number} BSE-side -- DB write failed: {e}")
@@ -626,14 +672,31 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
     results = {"enriched": 0, "failed": 0, "excluded": 0, "audit": []}
     results_lock = threading.Lock()
 
+    # TMT-US-0010 step 0: the sector / industry maps, loaded once from the
+    # tables and shared by every worker; new keys found during the run are
+    # added to the maps and the tables.
+    try:
+        taxonomy_maps = TaxonomyMaps(env_values)
+    except StockUniversePersistenceError as e:
+        logger.error(f"  [FAILED] {e}")
+        return
+    logger.info(f"  Sector / industry maps loaded: {len(taxonomy_maps.sectors)} sector(s), "
+                f"{len(taxonomy_maps.industries)} industry(ies).")
+
     threads = [
-        threading.Thread(target=_worker, args=(env_values, work_queue, results_lock, results), name=f"enrich-worker-{i}")
+        threading.Thread(target=_worker, args=(env_values, work_queue, results_lock, results, taxonomy_maps),
+                         name=f"enrich-worker-{i}")
         for i in range(WORKER_THREAD_COUNT)
     ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    try:
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+    finally:
+        taxonomy_maps.close()
+    logger.info(f"  Sector / industry maps: {taxonomy_maps.new_sectors} new sector(s), "
+                f"{taxonomy_maps.new_industries} new industry(ies) added this run.")
 
     completed_at = datetime.now(timezone.utc)
     elapsed_minutes = round((completed_at - started_at).total_seconds() / 60, 1)
