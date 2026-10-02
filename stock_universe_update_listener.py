@@ -568,6 +568,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
             conn = get_connection(env_values)
             set_enrichment_running(conn, True)
             conn.close()
+            logger.info("  Entering maintenance mode -- stock universe enrichment running.")
         except (DbConnectionError, StockUniversePersistenceError) as e:
             logger.error(f"  [FAILED] Could not set maintenance status -- aborting batch rather than running without the banner active: {e}")
             return
@@ -580,6 +581,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
                 conn = get_connection(env_values)
                 set_enrichment_running(conn, False)
                 conn.close()
+                logger.info("  Exiting maintenance mode -- cleared.")
             except (DbConnectionError, StockUniversePersistenceError) as e:
                 logger.error(f"  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
                       f"the app may be stuck showing the maintenance banner to every user until this is fixed. {e}")

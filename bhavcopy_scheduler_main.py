@@ -954,7 +954,9 @@ def check_and_process(env_values):
         }
         print_summary(cycle_summary, activated_indicators, time.time() - cycle_start)
     finally:
-        if not _set_maintenance(env_values, False):
+        if _set_maintenance(env_values, False):
+            logger.info("  Exiting maintenance mode -- cleared.")
+        else:
             logger.error("  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
                   "the app may be stuck showing the maintenance banner to every user until this is fixed.")
     return True
