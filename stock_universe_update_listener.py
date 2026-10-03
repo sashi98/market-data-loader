@@ -682,7 +682,7 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
         return
     logger.info(f"  Sector / industry maps loaded: {len(taxonomy_maps.sectors)} sector(s), "
                 f"{len(taxonomy_maps.industries)} industry(ies); names cleaned: {taxonomy_maps.cleaned_sectors} sector(s), "
-                f"{taxonomy_maps.cleaned_industries} industry(ies).")
+                f"{taxonomy_maps.cleaned_industries} industry(ies); stocks set to Others: {taxonomy_maps.others_filled}.")
 
     threads = [
         threading.Thread(target=_worker, args=(env_values, work_queue, results_lock, results, taxonomy_maps),
