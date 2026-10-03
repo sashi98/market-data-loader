@@ -15,14 +15,21 @@
 # Different letters give different keys ("Healthcare" vs "Health
 # Services" stay separate).
 #
-# Display name case -- identical to the taxonomy_display_name() SQL function
-# in 019.01.00: lower-case everything, then upper-case each letter that starts
-# a word (start of text, or after a space - / ( & , .).
-#   "CONSUMER GOODS" / "consumer goods" / "Consumer goods" -> "Consumer Goods"
+# Display name (clean_name):
+#   1. symbols other than letters, digits and '&' are removed: apostrophes
+#      dropped ("Men's" -> "Mens"), everything else becomes a space; '&' kept
+#      with a space on each side; repeated spaces collapsed.
+#   2. case -- same as the taxonomy_display_name() SQL function in 019.01.00:
+#      lower-case everything, then upper-case the first letter of each word.
+#   "OIL, GAS & CONSUMABLE FUELS" -> "Oil Gas & Consumable Fuels"
+#   "Telecom - Equipment & Accessories" -> "Telecom Equipment & Accessories"
+# The key is always built from the source's raw name, so cleaning never moves
+# a stock to another key.
 #
 # Flow per enrichment run (TaxonomyMaps):
 #   0. At start, load the sector map {sector_key: name} and the industry map
-#      {(sector_key, industry_key): name} from the tables.
+#      {(sector_key, industry_key): name} from the tables; any stored name
+#      that is not in clean form is rewritten (table + stock_universe).
 #   For every stock's fetched details (SD):
 #   1-3. Read sector / industry from SD and build the keys. A key already in
 #      the map keeps its display name; a new key is added to the map with
@@ -32,7 +39,8 @@
 #   5. A new key is inserted into sector / industry at once (own autocommit
 #      connection), so it exists before any stock row points at it.
 #   6. The caller upserts SD into stock_universe.
-# A display name, once stored, is never changed by enrichment.
+# Apart from that start-of-run clean-up, a stored display name is never
+# changed by enrichment.
 # -----------------------------------------------------------
 
 import re
@@ -55,6 +63,8 @@ OFFICIAL_SOURCES = {SOURCE_BSE, SOURCE_NSE}
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 _SPACES = re.compile(r"\s+")
 _WORD_START = re.compile(r"(^|[\s\-/(&,.])([a-z])")
+_APOSTROPHES = re.compile(r"['\u2018\u2019`]")
+_NOT_NAME_CHAR = re.compile(r"[^A-Za-z0-9&]+")
 _NAME_MAX = 100
 
 
@@ -72,11 +82,16 @@ def display_case(name):
 
 
 def clean_name(name):
-    """Display form of a source name: trimmed, repeated spaces collapsed, display case; None when blank."""
+    """
+    Display form of a source name: only letters, digits and '&' kept (apostrophes dropped, other symbols -> space,
+    '&' spaced), repeated spaces collapsed, display case. None when nothing is left.
+    "OIL, GAS & CONSUMABLE FUELS" -> "Oil Gas & Consumable Fuels".
+    """
     if name is None:
         return None
-    cleaned = _SPACES.sub(" ", str(name)).strip()
-    return display_case(cleaned[:_NAME_MAX]) if cleaned else None
+    s = _APOSTROPHES.sub("", str(name)).replace("&", " & ")
+    s = _SPACES.sub(" ", _NOT_NAME_CHAR.sub(" ", s)).strip()
+    return display_case(s[:_NAME_MAX].strip()) if s else None
 
 
 class TaxonomyMaps:
@@ -99,6 +114,33 @@ class TaxonomyMaps:
             raise StockUniversePersistenceError(f"Failed to load sector / industry maps: {e}")
         self.new_sectors = 0
         self.new_industries = 0
+        self.cleaned_sectors, self.cleaned_industries = self._clean_stored_names()
+
+    def _clean_stored_names(self):
+        """Rewrites stored display names that are not in clean form, in the tables, the maps and stock_universe."""
+        sectors = industries = 0
+        try:
+            with self._conn.cursor() as cur:
+                for key, name in list(self.sectors.items()):
+                    clean = clean_name(name) or name
+                    if clean != name:
+                        cur.execute("UPDATE sector SET name = %s, updated_at = CURRENT_TIMESTAMP WHERE sector_key = %s",
+                                    [clean, key])
+                        cur.execute("UPDATE stock_universe SET sector = %s WHERE sector_key = %s", [clean, key])
+                        self.sectors[key] = clean
+                        sectors += 1
+                for (sector_key, key), name in list(self.industries.items()):
+                    clean = clean_name(name) or name
+                    if clean != name:
+                        cur.execute("UPDATE industry SET name = %s, updated_at = CURRENT_TIMESTAMP "
+                                    "WHERE sector_key = %s AND industry_key = %s", [clean, sector_key, key])
+                        cur.execute("UPDATE stock_universe SET industry = %s WHERE sector_key = %s AND industry_key = %s",
+                                    [clean, sector_key, key])
+                        self.industries[(sector_key, key)] = clean
+                        industries += 1
+        except Exception as e:
+            raise StockUniversePersistenceError(f"Failed to clean stored sector / industry names: {e}")
+        return sectors, industries
 
     def close(self):
         try:
@@ -129,13 +171,14 @@ class TaxonomyMaps:
         Steps 1-5 for one stock: returns {sector, sector_key, industry, industry_key} with the map's display
         names, adding (and inserting) new keys. Missing sector / industry -> OTHERS / "Others".
         """
+        # Keys from the raw source names (same as the SQL backfill), display names from the cleaned ones.
         sector_name = clean_name(sector)
-        sector_key = taxonomy_key(sector_name)
-        if sector_key is None:
+        sector_key = taxonomy_key(sector)
+        if sector_key is None or sector_name is None:
             sector_key, sector_name = OTHERS_KEY, OTHERS_NAME
         industry_name = clean_name(industry)
-        industry_key = taxonomy_key(industry_name)
-        if industry_key is None:
+        industry_key = taxonomy_key(industry)
+        if industry_key is None or industry_name is None:
             industry_key, industry_name = OTHERS_KEY, OTHERS_NAME
         try:
             with self._lock, self._conn.cursor() as cur:
