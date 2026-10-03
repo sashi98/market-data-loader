@@ -368,6 +368,10 @@ def update_stock_fundamentals(conn, isin_number, exchange, fields):
     if not fields:
         return []
 
+    # TMT-US-0010: sector / industry display names live in the sector / industry tables (keys only on the row).
+    fields = {k: v for k, v in fields.items() if k not in ("sector", "industry")}
+    if not fields:
+        return []
     fields, dropped = _sanitize_numeric_fields(fields)
     if not fields:
         return dropped
