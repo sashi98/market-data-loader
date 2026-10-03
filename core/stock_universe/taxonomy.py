@@ -105,6 +105,7 @@ class TaxonomyMaps:
         try:
             self._conn = get_connection(env_values)
             self._conn.autocommit = True
+            self.others_filled = self._fill_others()
             with self._conn.cursor() as cur:
                 cur.execute("SELECT sector_key, name FROM sector")
                 self.sectors = {k: n for k, n in cur.fetchall()}
@@ -115,6 +116,27 @@ class TaxonomyMaps:
         self.new_sectors = 0
         self.new_industries = 0
         self.cleaned_sectors, self.cleaned_industries = self._clean_stored_names()
+
+    def _fill_others(self):
+        """
+        Gives every stock without a sector key OTHERS / OTHERS, and every stock with a sector but no industry key
+        industry OTHERS under its sector (rows added to the tables as needed). Returns the number of stocks changed.
+        """
+        with self._conn.cursor() as cur:
+            cur.execute("INSERT INTO sector (sector_key, name) VALUES (%s, %s) ON CONFLICT (sector_key) DO NOTHING",
+                        [OTHERS_KEY, OTHERS_NAME])
+            cur.execute("INSERT INTO industry (sector_key, industry_key, name) "
+                        "SELECT DISTINCT sector_key, %s, %s FROM stock_universe "
+                        "WHERE sector_key IS NOT NULL AND industry_key IS NULL "
+                        "UNION SELECT %s, %s, %s "
+                        "ON CONFLICT (sector_key, industry_key) DO NOTHING",
+                        [OTHERS_KEY, OTHERS_NAME, OTHERS_KEY, OTHERS_KEY, OTHERS_NAME])
+            cur.execute("UPDATE stock_universe SET industry_key = %s, industry = %s "
+                        "WHERE sector_key IS NOT NULL AND industry_key IS NULL", [OTHERS_KEY, OTHERS_NAME])
+            filled = cur.rowcount
+            cur.execute("UPDATE stock_universe SET sector_key = %s, sector = %s, industry_key = %s, industry = %s "
+                        "WHERE sector_key IS NULL", [OTHERS_KEY, OTHERS_NAME, OTHERS_KEY, OTHERS_NAME])
+            return filled + cur.rowcount
 
     def _clean_stored_names(self):
         """Rewrites stored display names that are not in clean form, in the tables, the maps and stock_universe."""
