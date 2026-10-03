@@ -6,7 +6,8 @@
 # from NSE, "Oil, Gas & Consumable Fuels" from BSE, "SERVICES" vs
 # "Services"). Every name is reduced to a KEY; the sector / industry tables
 # (Liquibase 019.01.00) hold one display name per key, and stock_universe
-# gets the keys plus that display name, so every screen shows one name.
+# holds only the keys (its sector / industry name columns were dropped), so
+# every screen shows one name.
 #
 # Key rule -- identical to the taxonomy_key() SQL function in 019.01.00:
 #   '&' -> ' AND ', every run of characters other than A-Z a-z 0-9 -> one
@@ -29,7 +30,8 @@
 # Flow per enrichment run (TaxonomyMaps):
 #   0. At start, load the sector map {sector_key: name} and the industry map
 #      {(sector_key, industry_key): name} from the tables; any stored name
-#      that is not in clean form is rewritten (table + stock_universe).
+#      that is not in clean form is rewritten in the table (stock_universe
+#      holds only the keys; the backend reads names from the tables).
 #   For every stock's fetched details (SD):
 #   1-3. Read sector / industry from SD and build the keys. A key already in
 #      the map keeps its display name; a new key is added to the map with
@@ -131,15 +133,15 @@ class TaxonomyMaps:
                         "UNION SELECT %s, %s, %s "
                         "ON CONFLICT (sector_key, industry_key) DO NOTHING",
                         [OTHERS_KEY, OTHERS_NAME, OTHERS_KEY, OTHERS_KEY, OTHERS_NAME])
-            cur.execute("UPDATE stock_universe SET industry_key = %s, industry = %s "
-                        "WHERE sector_key IS NOT NULL AND industry_key IS NULL", [OTHERS_KEY, OTHERS_NAME])
+            cur.execute("UPDATE stock_universe SET industry_key = %s "
+                        "WHERE sector_key IS NOT NULL AND industry_key IS NULL", [OTHERS_KEY])
             filled = cur.rowcount
-            cur.execute("UPDATE stock_universe SET sector_key = %s, sector = %s, industry_key = %s, industry = %s "
-                        "WHERE sector_key IS NULL", [OTHERS_KEY, OTHERS_NAME, OTHERS_KEY, OTHERS_NAME])
+            cur.execute("UPDATE stock_universe SET sector_key = %s, industry_key = %s "
+                        "WHERE sector_key IS NULL", [OTHERS_KEY, OTHERS_KEY])
             return filled + cur.rowcount
 
     def _clean_stored_names(self):
-        """Rewrites stored display names that are not in clean form, in the tables, the maps and stock_universe."""
+        """Rewrites stored display names that are not in clean form, in the tables and the maps."""
         sectors = industries = 0
         try:
             with self._conn.cursor() as cur:
@@ -148,7 +150,6 @@ class TaxonomyMaps:
                     if clean != name:
                         cur.execute("UPDATE sector SET name = %s, updated_at = CURRENT_TIMESTAMP WHERE sector_key = %s",
                                     [clean, key])
-                        cur.execute("UPDATE stock_universe SET sector = %s WHERE sector_key = %s", [clean, key])
                         self.sectors[key] = clean
                         sectors += 1
                 for (sector_key, key), name in list(self.industries.items()):
@@ -156,8 +157,6 @@ class TaxonomyMaps:
                     if clean != name:
                         cur.execute("UPDATE industry SET name = %s, updated_at = CURRENT_TIMESTAMP "
                                     "WHERE sector_key = %s AND industry_key = %s", [clean, sector_key, key])
-                        cur.execute("UPDATE stock_universe SET industry = %s WHERE sector_key = %s AND industry_key = %s",
-                                    [clean, sector_key, key])
                         self.industries[(sector_key, key)] = clean
                         industries += 1
         except Exception as e:
