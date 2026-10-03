@@ -15,6 +15,11 @@
 # Different letters give different keys ("Healthcare" vs "Health
 # Services" stay separate).
 #
+# Display name case -- identical to the taxonomy_display_name() SQL function
+# in 019.01.00: lower-case everything, then upper-case each letter that starts
+# a word (start of text, or after a space - / ( & , .).
+#   "CONSUMER GOODS" / "consumer goods" / "Consumer goods" -> "Consumer Goods"
+#
 # Flow per enrichment run (TaxonomyMaps):
 #   0. At start, load the sector map {sector_key: name} and the industry map
 #      {(sector_key, industry_key): name} from the tables.
@@ -49,6 +54,7 @@ OFFICIAL_SOURCES = {SOURCE_BSE, SOURCE_NSE}
 
 _NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
 _SPACES = re.compile(r"\s+")
+_WORD_START = re.compile(r"(^|[\s\-/(&,.])([a-z])")
 _NAME_MAX = 100
 
 
@@ -60,12 +66,17 @@ def taxonomy_key(name):
     return words.replace(" ", "_").upper() or None
 
 
+def display_case(name):
+    """"ANY VALUE" / "any value" / "Any value" -> "Any Value" (same rule as the taxonomy_display_name() SQL function)."""
+    return _WORD_START.sub(lambda m: m.group(1) + m.group(2).upper(), name.lower())
+
+
 def clean_name(name):
-    """Display form of a source name: trimmed, repeated spaces collapsed; None when blank."""
+    """Display form of a source name: trimmed, repeated spaces collapsed, display case; None when blank."""
     if name is None:
         return None
     cleaned = _SPACES.sub(" ", str(name)).strip()
-    return cleaned[:_NAME_MAX] if cleaned else None
+    return display_case(cleaned[:_NAME_MAX]) if cleaned else None
 
 
 class TaxonomyMaps:
