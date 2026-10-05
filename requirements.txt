@@ -4,4 +4,4 @@ pandas
 yfinance==1.4.1
 tradingview-screener
 nse==3.1.2
-bse==3.3.0
+bse==3.3.3
