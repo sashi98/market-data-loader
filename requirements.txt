@@ -1,7 +1,7 @@
 requests
 psycopg2-binary
 pandas
-yfinance
+yfinance==1.4.1
 tradingview-screener
-nse
-bse
+nse==3.1.2
+bse==3.3.0
