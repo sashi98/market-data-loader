@@ -128,7 +128,11 @@ def _get_exclusion_flags(nse_session, symbol):
                 f"    [retry {attempt}/{MAX_ATTEMPTS}] NSE equityMetaInfo({symbol}) -- {e}"
             ),
         )
-    except Exception:
+    except Exception as e:
+        # Logged (not silent) since 2026-10-05, TMT-MDL-BUG-0004: an nse
+        # package upgrade (3.1.2 -> 5.0.0) removed this method and prod
+        # enrichment lost every NSE result without a single log line.
+        print(f"    NSE equityMetaInfo({symbol}) failed -- {type(e).__name__}: {e}")
         return None
 
     if str(meta.get("isDelisted", "false")).lower() == "true":
@@ -154,7 +158,9 @@ def _get_detailed_scrip_data(nse_session, symbol, exchange):
                     f"    [retry {attempt}/{MAX_ATTEMPTS}] NSE getDetailedScripData({symbol}, series={series}) -- {e}"
                 ),
             )
-        except Exception:
+        except Exception as e:
+            # Logged since 2026-10-05 (TMT-MDL-BUG-0004) -- see _get_exclusion_flags.
+            print(f"    NSE getDetailedScripData({symbol}, series={series}) failed -- {type(e).__name__}: {e}")
             continue
 
     return None
