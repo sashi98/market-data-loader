@@ -67,15 +67,14 @@ def test_m2_json_and_html_are_loaded_and_moved():
         "MARKET_DAILY_BRIEF_24-OCT-2026.html", "MARKET_DAILY_BRIEF_24-OCT-2026.json"]
 
 
-def test_m3_date_mismatch_goes_to_failed_with_reason():
+def test_m3_file_name_date_differs_json_wins_with_note():
     d = _dir()
-    _write(d, "MARKET_DAILY_BRIEF_25-OCT-2026.json", json.dumps(GOOD))
+    _write(d, "MARKET_DAILY_BRIEF_25-OCT-2026.json", json.dumps(GOOD))     # JSON says 24-OCT
     _write(d, "MARKET_DAILY_BRIEF_25-OCT-2026.html", HTML)
     result, saved = _run(d)
-    assert not saved and len(result.failed) == 1
-    reason = (d / "failed" / "MARKET_DAILY_BRIEF_25-OCT-2026.json.reason.txt").read_text(encoding="utf-8")
-    assert "does not match" in reason
-    assert (d / "failed" / "MARKET_DAILY_BRIEF_25-OCT-2026.html").exists()
+    assert saved[0].trade_date == date(2026, 10, 24) and result.loaded == ["24-OCT-2026"]
+    assert result.notes and "saved as 24-OCT-2026" in result.notes[0][1]
+    assert saved[0].html == HTML
 
 
 def test_m4_bad_json_and_missing_edition_fail():
@@ -86,6 +85,49 @@ def test_m4_bad_json_and_missing_edition_fail():
     assert not saved
     reasons = " | ".join(r for _, r in result.failed)
     assert "not valid JSON" in reasons and "no edition" in reasons
+
+
+def test_m10_trade_date_in_json_identifies_the_brief():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_28-OCT-2026.json", json.dumps({"edition": "post-close-4pm", "tradeDate": "28-OCT-2026"}))
+    _write(d, "MARKET_DAILY_BRIEF_28-OCT-2026.html", HTML)
+    result, saved = _run(d)
+    assert saved[0].trade_date == date(2026, 10, 28) and result.loaded == ["28-OCT-2026"] and not result.notes
+    # tradeDate wins over the file name too
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_29-OCT-2026.json", json.dumps({"edition": "e", "tradeDate": "28-oct-2026", "asOfDate": "2026-10-28"}))
+    result, saved = _run(d)
+    assert saved[0].trade_date == date(2026, 10, 28) and result.notes
+
+
+def test_m11_trade_date_and_as_of_date_disagree_fails():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_28-OCT-2026.json", json.dumps({"edition": "e", "tradeDate": "28-OCT-2026", "asOfDate": "2026-10-27"}),
+           age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert not saved and "disagree" in result.failed[0][1]
+    _write(d, "MARKET_DAILY_BRIEF_28-OCT-2026.json", json.dumps({"edition": "e", "tradeDate": "28/10/2026"}), age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert not saved and "not a date" in result.failed[0][1]
+
+
+def test_m12_same_trade_date_twice_in_one_poll_newest_saved_last():
+    d = _dir()
+    # two uploads of the 28-OCT brief under different file names; the newer one must be saved last (it wins the upsert)
+    _write(d, "MARKET_DAILY_BRIEF_28-OCT-2026.json", json.dumps({"edition": "e", "tradeDate": "28-OCT-2026", "title": "older"}),
+           age=HTML_GRACE_SECONDS + 600)
+    _write(d, "MARKET_DAILY_BRIEF_27-OCT-2026.json", json.dumps({"edition": "e", "tradeDate": "28-OCT-2026", "title": "newer"}),
+           age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert [b.title for b in saved] == ["older", "newer"] and result.loaded == ["28-OCT-2026", "28-OCT-2026"]
+
+
+def test_m13_replaced_is_reported():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_24-OCT-2026.json", json.dumps(GOOD))
+    _write(d, "MARKET_DAILY_BRIEF_24-OCT-2026.html", HTML)
+    result = process_inbox(d, lambda brief: True)        # the DB said: an existing row was replaced
+    assert result.replaced == ["24-OCT-2026"]
 
 
 def test_m5_files_still_downloading_wait():
