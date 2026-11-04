@@ -214,6 +214,8 @@ from core.stock_universe.persistence import (
     StockUniversePersistenceError,
 )
 from core.rollup.rollup_persistence import get_metadata_freshness, RollupPersistenceError
+from core.recompute import mode as recompute_mode
+from core.recompute import queue as recompute_queue
 from core.trading_calendar import compute_trading_date_range, TradingCalendarError
 from core.date_format import fmt_date, fmt_datetime
 from core import auth_client
@@ -274,6 +276,13 @@ REQUIRED_STOCK_UNIVERSE_SOURCES = [
 
 # indicator_id -> its own runner module's run(conn, indicator_id,
 # start_date, end_date) function -- STEP 8's per-indicator dispatch.
+# TMT-MDL-US-0005-003: indicators that take mode_of_recompute -> their step in core/recompute/mode.py.
+MODE_OF_RECOMPUTE_STEP_BY_INDICATOR = {
+    "rsi14d": recompute_mode.RSI14D,
+    "rsi14w": recompute_mode.RSI14W,
+    "rsi14m": recompute_mode.RSI14M,
+}
+
 RUNNERS = {
     "rsi14d": rsi14d_runner.run,
     "rsi14w": rsi14w_runner.run,
@@ -476,7 +485,20 @@ def _own_target_stale(freshness_date, latest_trade_date):
     return freshness_date is None or freshness_date < latest_trade_date
 
 
-def _run_rollup_step(env_values, runner_module, gap, latest_trade_date):
+def _queued_count(env_values, exchange, target):
+    """Rows waiting in recompute_queue for (exchange, target); 0 when it cannot be read (logged)."""
+    try:
+        conn = get_connection(env_values)
+        try:
+            return len(recompute_queue.fetch_queued(conn, exchange, target))
+        finally:
+            conn.close()
+    except (DbConnectionError, recompute_queue.RecomputeQueueError) as e:
+        logger.info(f"  [{exchange}] Could not read recompute_queue for {target} ({e}).")
+        return 0
+
+
+def _run_rollup_step(env_values, runner_module, gap, latest_trade_date, mode_of_recompute):
     """
     STEP 5 / STEP 6 -- per exchange, gated on gap[exchange] OR this
     step's OWN rollup metadata table being itself behind
@@ -500,11 +522,13 @@ def _run_rollup_step(env_values, runner_module, gap, latest_trade_date):
             logger.info(f"  [{label}/{exchange}] Could not check {metadata_table} freshness ({e}) -- running anyway.")
             own_freshness = None
 
-        if not gap[exchange] and not _own_target_stale(own_freshness, latest_trade_date):
-            logger.info(f"  [{label}/{exchange}] SKIPPED -- no gap and already current through {own_freshness}.")
+        queued = _queued_count(env_values, exchange, config["target"])
+        if not gap[exchange] and not _own_target_stale(own_freshness, latest_trade_date) and not queued:
+            logger.info(f"  [{label}/{exchange}] SKIPPED -- no gap, nothing queued, and already current through {own_freshness}.")
             continue
 
-        runner_module.run(env_values, exchange, DEFAULT_START_DATE, latest_trade_date)
+        # TMT-MDL-US-0005: also runs when STEP 4 queued stocks for a rebuild (recompute_queue).
+        runner_module.run(env_values, exchange, DEFAULT_START_DATE, latest_trade_date, mode_of_recompute)
 
 
 def _indicators_pending(env_values, latest_trade_date):
@@ -661,7 +685,12 @@ def _run_indicator(env_values, indicator_id, start_date, end_date):
         return
 
     try:
-        completed_cleanly = runner(conn, indicator_id, start_date, end_date)
+        step = MODE_OF_RECOMPUTE_STEP_BY_INDICATOR.get(indicator_id)
+        if step is not None:
+            completed_cleanly = runner(conn, indicator_id, start_date, end_date,
+                                       recompute_mode.mode_of_recompute(env_values, step))
+        else:
+            completed_cleanly = runner(conn, indicator_id, start_date, end_date)
         if completed_cleanly:
             deactivate_indicator(conn, indicator_id)
             logger.info(f"  [{indicator_id}] Complete -- deactivated in indicators_registry.")
@@ -721,6 +750,27 @@ def _set_maintenance(env_values, is_running):
         conn.close()
 
 
+# TMT-MDL-BUG (02-Nov-2026 incident) -- True while THIS process may still be holding its own
+# scheduler_running flag: set right after entering maintenance mode, reset once it is cleared. If the
+# finally block below cannot clear it (the DB connection dropped mid-cycle), the flag stays on and every
+# retry used to fail at login ("Scheduled maintenance is underway" -- MaintenanceModeFilter blocks
+# /api/auth/login too) until the 6-hour stale-lock recovery on the next restart. Now the next cycle
+# clears its own leftover first. Only this process's own flag is ever cleared, never another instance's.
+_OWN_MAINTENANCE_FLAG_LEFT_ON = False
+
+
+def _clear_own_leftover_maintenance_flag(env_values):
+    global _OWN_MAINTENANCE_FLAG_LEFT_ON
+    if not _OWN_MAINTENANCE_FLAG_LEFT_ON:
+        return
+    if _set_maintenance(env_values, False):
+        _OWN_MAINTENANCE_FLAG_LEFT_ON = False
+        logger.warning("  Cleared this scheduler's own maintenance flag left on by the previous (failed) cycle.")
+    else:
+        logger.error("  [FAILED] This scheduler's own maintenance flag from the previous cycle is still on and "
+                     "could not be cleared -- login will be blocked until it is.")
+
+
 def check_and_process(env_values):
     """
     One full scheduler cycle -- STEPS 2 through 10. Returns True if the
@@ -770,6 +820,8 @@ def check_and_process(env_values):
         logger.error("  [FAILED] Stock Universe enrichment is currently running -- deferring this cycle until it "
                       "finishes, rather than attempting to log in (which the maintenance filter would block anyway).")
         return False
+
+    _clear_own_leftover_maintenance_flag(env_values)
 
     # Authenticate BEFORE entering maintenance mode -- tmt's own
     # maintenance filter checks maintenance_status on EVERY request,
@@ -850,6 +902,8 @@ def check_and_process(env_values):
     if not _set_maintenance(env_values, True):
         logger.error("  [FAILED] Could not enter maintenance mode -- skipping this cycle rather than running unprotected.")
         return False
+    global _OWN_MAINTENANCE_FLAG_LEFT_ON
+    _OWN_MAINTENANCE_FLAG_LEFT_ON = True
 
     # CRITICAL: this finally block is what guarantees maintenance mode
     # never stays stuck on.
@@ -889,6 +943,16 @@ def check_and_process(env_values):
         # bhavcopy is otherwise already current). Always a full blind
         # recompute of [DEFAULT_START_DATE, latest_trade_date] when it
         # runs at all.
+        # TMT-MDL-US-0005: mode_of_recompute per runner from config/.env (validated at startup).
+        mode_price_adjustment = recompute_mode.mode_of_recompute(env_values, recompute_mode.PRICE_ADJUSTMENT)
+        mode_weekly_rollup = recompute_mode.mode_of_recompute(env_values, recompute_mode.WEEKLY_ROLLUP)
+        mode_monthly_rollup = recompute_mode.mode_of_recompute(env_values, recompute_mode.MONTHLY_ROLLUP)
+        logger.info(f"\nmode_of_recompute: price adjustment={mode_price_adjustment}, "
+                    f"weekly rollup={mode_weekly_rollup}, monthly rollup={mode_monthly_rollup}, "
+                    f"rsi14d={recompute_mode.mode_of_recompute(env_values, recompute_mode.RSI14D)}, "
+                    f"rsi14w={recompute_mode.mode_of_recompute(env_values, recompute_mode.RSI14W)}, "
+                    f"rsi14m={recompute_mode.mode_of_recompute(env_values, recompute_mode.RSI14M)}")
+
         logger.info("\nSTEP 4 -- Price Adjustment Runner")
         for exchange in EXCHANGES:
             try:
@@ -901,12 +965,14 @@ def check_and_process(env_values):
                 logger.info(f"  [{exchange}] Could not check bhav_copy_adjusted_metadata freshness ({e}) -- running anyway.")
                 own_freshness = None
 
-            if not gap[exchange] and not _own_target_stale(own_freshness, latest_trade_date):
-                logger.info(f"  [{exchange}] SKIPPED -- no gap and bhav_copy_adjusted already current through {own_freshness}.")
+            forced = _queued_count(env_values, exchange, recompute_queue.TARGET_PRICE_ADJUSTMENT)
+            if not gap[exchange] and not _own_target_stale(own_freshness, latest_trade_date) and not forced:
+                logger.info(f"  [{exchange}] SKIPPED -- no gap, nothing forced, and bhav_copy_adjusted already current through {own_freshness}.")
                 continue
 
             try:
-                bhav_copy_d_price_adjustment_runner.run(env_values, exchange, DEFAULT_START_DATE, latest_trade_date)
+                bhav_copy_d_price_adjustment_runner.run(env_values, exchange, DEFAULT_START_DATE, latest_trade_date,
+                                                        mode_price_adjustment)
             except bhav_copy_d_price_adjustment_runner.PriceAdjustmentError as e:
                 logger.error(f"  [FAILED] Price adjustment for {exchange} failed: {e}")
 
@@ -915,9 +981,9 @@ def check_and_process(env_values):
         # recompute of [DEFAULT_START_DATE, latest_trade_date], including
         # the current still-open week/month.
         logger.info("\nSTEP 5 -- Weekly Bhav Copy Runner")
-        _run_rollup_step(env_values, bhav_copy_w_runner, gap, latest_trade_date)
+        _run_rollup_step(env_values, bhav_copy_w_runner, gap, latest_trade_date, mode_weekly_rollup)
         logger.info("\nSTEP 6 -- Monthly Bhav Copy Runner")
-        _run_rollup_step(env_values, bhav_copy_m_runner, gap, latest_trade_date)
+        _run_rollup_step(env_values, bhav_copy_m_runner, gap, latest_trade_date, mode_monthly_rollup)
 
         # STEP 7 -- Indicators Registry Update -- pure IWM-freshness
         # gate, no reference to gap[] at all (see this file's own
@@ -955,10 +1021,11 @@ def check_and_process(env_values):
         print_summary(cycle_summary, activated_indicators, time.time() - cycle_start)
     finally:
         if _set_maintenance(env_values, False):
+            _OWN_MAINTENANCE_FLAG_LEFT_ON = False
             logger.info("  Exiting maintenance mode -- cleared.")
         else:
-            logger.error("  [FAILED] Could not clear maintenance status -- MANUAL INTERVENTION NEEDED: "
-                  "the app may be stuck showing the maintenance banner to every user until this is fixed.")
+            logger.error("  [FAILED] Could not clear maintenance status -- the next cycle attempt will clear it "
+                         "first (before logging in); until then every user sees the maintenance banner.")
     return True
 
 
@@ -1127,7 +1194,8 @@ def run():
     with start_run_logging("bhavcopy_scheduler_main"):
         try:
             env_values = load_and_validate_env()
-        except EnvValidationError as e:
+            recompute_mode.validate_all(env_values)
+        except (EnvValidationError, recompute_mode.ModeOfRecomputeError) as e:
             logger.error(f"[FAILED] {e}")
             sys.exit(1)
 

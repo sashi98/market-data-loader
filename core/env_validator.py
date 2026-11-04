@@ -41,6 +41,15 @@ REQUIRED_KEYS = [
     # this file is shared across all of them.
     "TMT_ADMIN_USER_ID",
     "TMT_ADMIN_PASSWORD",
+    # ADDED 2026-11-03 (TMT-MDL-US-0005) -- mode_of_recompute per runner, FULL | SHADOW | INCREMENTAL.
+    # No default on purpose: every environment states its own (prod / UAT FULL, dev SHADOW until each
+    # runner is proven). Values are checked by core/recompute/mode.py's validate_all() at scheduler start.
+    "MDL_MODE_OF_RECOMPUTE_PRICE_ADJUSTMENT",
+    "MDL_MODE_OF_RECOMPUTE_WEEKLY_ROLLUP",
+    "MDL_MODE_OF_RECOMPUTE_MONTHLY_ROLLUP",
+    "MDL_MODE_OF_RECOMPUTE_RSI14D",
+    "MDL_MODE_OF_RECOMPUTE_RSI14W",
+    "MDL_MODE_OF_RECOMPUTE_RSI14M",
 ]
 
 # market-data-loader/core/env_validator.py -> market-data-loader/ -> app/ -> track-my-trade/

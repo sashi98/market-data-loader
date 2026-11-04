@@ -77,21 +77,34 @@ def fetch_closes_for_ma(conn, source_table, exchange, start_date, end_date, wind
             f"Unknown source_table={source_table!r} -- must be one of {sorted(ISIN_COLUMN_BY_SOURCE)}"
         )
     try:
+        # REWRITTEN 2026-11-03 (TMT-MDL-US-0005) -- the lookback used to rank EVERY earlier row of the
+        # exchange with ROW_NUMBER() and keep the last (window - 1) per stock. On 03-Nov on dev that sort
+        # ran Postgres out of memory ("out of memory ... Caller tuples") during ma50d, the server went into
+        # recovery mode and every other connection to it dropped -- prod's included, as it is the same
+        # Postgres server. Now each stock that has rows in range fetches its last (window - 1) earlier rows
+        # with LIMIT through the (security_id, exchange, trade_date) unique index: small, constant work per
+        # stock, no big sort. Same rows for every stock the runner keeps (it keeps only rows in range).
         query = f"""
             WITH in_range AS (
                 SELECT security_id, {isin_expr}, exchange, symbol, trade_date, close
                   FROM {source_table}
                  WHERE exchange = %(exchange)s AND trade_date BETWEEN %(start_date)s AND %(end_date)s
             ),
-            lookback AS (
-                SELECT security_id, {isin_expr}, exchange, symbol, trade_date, close,
-                       ROW_NUMBER() OVER (PARTITION BY security_id ORDER BY trade_date DESC) AS rn
-                  FROM {source_table}
-                 WHERE exchange = %(exchange)s AND trade_date < %(start_date)s
+            stocks AS (
+                SELECT DISTINCT security_id FROM in_range
             )
             SELECT security_id, isin, exchange, symbol, trade_date, close FROM in_range
             UNION ALL
-            SELECT security_id, isin, exchange, symbol, trade_date, close FROM lookback WHERE rn <= %(lookback_rows)s
+            SELECT lb.security_id, lb.isin, lb.exchange, lb.symbol, lb.trade_date, lb.close
+              FROM stocks s
+              CROSS JOIN LATERAL (
+                    SELECT security_id, {isin_expr}, exchange, symbol, trade_date, close
+                      FROM {source_table} t
+                     WHERE t.security_id = s.security_id AND t.exchange = %(exchange)s
+                       AND t.trade_date < %(start_date)s
+                     ORDER BY t.trade_date DESC
+                     LIMIT %(lookback_rows)s
+              ) lb
             ORDER BY security_id, trade_date ASC
         """
         params = {

@@ -19,17 +19,20 @@
 
 from core.rollup.period import WEEKLY
 from core.rollup import rollup_runner
+from core.recompute import mode as recompute_mode
+from core.recompute import queue as recompute_queue
 
 CONFIG = {
     "period_type": WEEKLY,
     "label": "week",
     "rollup_table": "bhav_copy_w",
     "metadata_table": "bhav_copy_w_metadata",
+    "target": recompute_queue.TARGET_WEEKLY_ROLLUP,
     "run_audit_table": "bhav_copy_w_run_audit",
 }
 
 
-def run(env_values, exchange, start_date, end_date):
+def run(env_values, exchange, start_date, end_date, mode_of_recompute=recompute_mode.FULL):
     """STEP 5 -- Weekly Bhav Copy Runner, for ONE exchange."""
     print(f"STEP 5 -- Weekly Bhav Copy Runner [{exchange}]")
-    rollup_runner.run(env_values, CONFIG, exchange, start_date, end_date)
+    return rollup_runner.run(env_values, CONFIG, exchange, start_date, end_date, mode_of_recompute)
