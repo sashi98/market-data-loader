@@ -2,8 +2,8 @@
 #
 # Loads the "India Market Daily Brief" files into tmt's market_daily_brief table (TMT-US-0020).
 #
-# Sashikant runs the Claude scheduled task by hand; it gives two files named after the TRADE DATE the data
-# covers (not the day it ran):
+# Sashikant runs the Claude scheduled task by hand; it gives two files, normally named after the TRADE DATE the
+# data covers (not the day it ran):
 #     MARKET_DAILY_BRIEF_24-OCT-2026.json   schema-validated data (required)
 #     MARKET_DAILY_BRIEF_24-OCT-2026.html   the rendered dashboard (optional)
 # and he downloads both into <brief dir>/inbox. Each poll of market_brief_listener.py calls process_inbox():
@@ -11,10 +11,15 @@
 #   - a .json waits up to HTML_GRACE_SECONDS for its .html (the two downloads land seconds apart), then loads
 #     alone;
 #   - an .html with no .json waits (it is never loaded on its own);
-#   - checks: valid JSON object, "asOfDate" equals the file name's trade date, "edition" present;
-#   - good -> one upsert (a re-run for the same trade date replaces the row), files moved to processed/;
+#   - a brief is identified by the trade date INSIDE the JSON: "tradeDate" ("28-OCT-2026"; "2026-10-28" also read)
+#     first, else "asOfDate". The file name's date is only used to pair the .json with its .html; if it differs
+#     from the JSON's date, the JSON wins (noted in the log). A brief whose tradeDate and asOfDate disagree fails;
+#   - checks: valid JSON object, a trade date as above, "edition" present;
+#   - good -> one upsert on trade_date (the table's primary key): several uploads for the same trade date, on the
+#     same day or later, replace the row -- the last one loaded wins. Within one poll, briefs are saved oldest file
+#     first, so the newest upload of a trade date wins even when the file names differ. Files go to processed/;
 #     bad  -> files moved to failed/ with <name>.reason.txt next to them.
-# A browser's duplicate-download suffix ("... (1).json") is accepted; the newest file of a trade date wins.
+# A browser's duplicate-download suffix ("... (1).json") is accepted; the newest file of a name group wins.
 # Nothing here touches maintenance_status: loading a brief never locks the app.
 
 import json
@@ -44,6 +49,7 @@ UPSERT_SQL = """
         html_file_name = EXCLUDED.html_file_name,
         loaded_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
+    RETURNING (xmax <> 0) AS replaced
 """
 
 
@@ -61,11 +67,14 @@ class Brief:
     schema_version: str
     json_name: str
     html_name: str
+    note: str = None            # e.g. the file name's date differed from the JSON's tradeDate
 
 
 @dataclass
 class InboxResult:
     loaded: list = field(default_factory=list)   # trade dates loaded this poll ("24-OCT-2026")
+    replaced: list = field(default_factory=list) # of those, the ones that replaced an existing row
+    notes: list = field(default_factory=list)    # (file name, note) worth a log line
     failed: list = field(default_factory=list)   # (file name, reason)
     waiting: list = field(default_factory=list)  # file names left for the next poll
 
@@ -76,6 +85,19 @@ def parse_trade_date(text):
         return datetime.strptime(text.title(), "%d-%b-%Y").date()
     except ValueError:
         raise BriefError(f"'{text}' in the file name is not a date like 24-OCT-2026")
+
+
+def _json_date(value, key, name):
+    """A trade date from the JSON: "28-OCT-2026" or "2026-10-28[...]"; None if absent; BriefError if unreadable."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    text = str(value).strip()
+    for parse in (lambda t: datetime.strptime(t.title(), "%d-%b-%Y").date(), lambda t: date.fromisoformat(t[:10])):
+        try:
+            return parse(text)
+        except ValueError:
+            pass
+    raise BriefError(f"{name}: {key} '{text}' is not a date like 28-OCT-2026")
 
 
 def fmt_trade_date(d):
@@ -93,7 +115,7 @@ def build_brief(json_path, html_path=None):
     found = match_file(json_path.name)
     if not found or found[1] != "json":
         raise BriefError(f"{json_path.name} is not named MARKET_DAILY_BRIEF_<DD-MMM-YYYY>.json")
-    trade_date = parse_trade_date(found[0])
+    name_date = parse_trade_date(found[0])
     try:
         text = json_path.read_text(encoding="utf-8-sig")
         payload = json.loads(text)
@@ -101,16 +123,18 @@ def build_brief(json_path, html_path=None):
         raise BriefError(f"{json_path.name} is not valid JSON: {e}")
     if not isinstance(payload, dict):
         raise BriefError(f"{json_path.name} must hold one JSON object")
-    as_of = payload.get("asOfDate")
-    try:
-        as_of_date = date.fromisoformat(str(as_of)[:10]) if as_of else None
-    except ValueError:
-        as_of_date = None
-    if as_of_date is None:
-        raise BriefError(f"{json_path.name} has no valid asOfDate (YYYY-MM-DD)")
-    if as_of_date != trade_date:
-        raise BriefError(f"{json_path.name}: asOfDate {as_of_date.isoformat()} does not match the trade date "
-                         f"{fmt_trade_date(trade_date)} in the file name")
+    # The brief's identity: tradeDate in the JSON, else asOfDate.
+    trade = _json_date(payload.get("tradeDate"), "tradeDate", json_path.name)
+    as_of = _json_date(payload.get("asOfDate"), "asOfDate", json_path.name)
+    if trade and as_of and trade != as_of:
+        raise BriefError(f"{json_path.name}: tradeDate {fmt_trade_date(trade)} and asOfDate {as_of.isoformat()} disagree")
+    trade_date = trade or as_of
+    if trade_date is None:
+        raise BriefError(f"{json_path.name} has no tradeDate (DD-MMM-YYYY) or asOfDate (YYYY-MM-DD)")
+    note = None
+    if trade_date != name_date:
+        note = (f"file name says {fmt_trade_date(name_date)} but the JSON's {'tradeDate' if trade else 'asOfDate'} "
+                f"is {fmt_trade_date(trade_date)}; saved as {fmt_trade_date(trade_date)}")
     edition = payload.get("edition")
     if not isinstance(edition, str) or not edition.strip():
         raise BriefError(f"{json_path.name} has no edition")
@@ -133,16 +157,19 @@ def build_brief(json_path, html_path=None):
         schema_version=str(schema_version)[:40] if schema_version is not None else None,
         json_name=json_path.name,
         html_name=html_path.name if html_path is not None else None,
+        note=note,
     )
 
 
 def save_brief(conn, brief):
-    """Upserts one brief; commits, or rolls back and re-raises."""
+    """Upserts one brief (keyed by trade_date); True if it replaced an existing row. Commits, or rolls back and re-raises."""
     try:
         with conn.cursor() as cur:
             cur.execute(UPSERT_SQL, (brief.trade_date, brief.edition, brief.title, brief.payload_text, brief.html,
                                      brief.schema_version, brief.json_name, brief.html_name))
+            row = cur.fetchone()
         conn.commit()
+        return bool(row and row[0])
     except Exception:
         conn.rollback()
         raise
@@ -166,8 +193,8 @@ def _fail(paths, folder, reason):
 
 def process_inbox(brief_dir, save, now=None):
     """
-    One pass over <brief_dir>/inbox. `save(brief)` stores a Brief (raises on failure; a DB failure leaves the
-    files in the inbox for the next poll). Returns an InboxResult.
+    One pass over <brief_dir>/inbox. `save(brief)` stores a Brief and may return True when it replaced an existing
+    row (raises on failure; a DB failure leaves the files in the inbox for the next poll). Returns an InboxResult.
     """
     now = time.time() if now is None else now
     inbox, processed, failed = brief_dir / "inbox", brief_dir / "processed", brief_dir / "failed"
@@ -188,7 +215,11 @@ def process_inbox(brief_dir, save, now=None):
             continue
         groups.setdefault(found[0], {"json": [], "html": []})[found[1]].append(p)
 
-    for trade_text, files in sorted(groups.items()):
+    # Oldest upload first: when two name groups carry the same tradeDate, the newest one is saved last and wins.
+    def newest(files):
+        return max((p.stat().st_mtime for p in files["json"] + files["html"]), default=0)
+
+    for _name_date, files in sorted(groups.items(), key=lambda kv: (newest(kv[1]), kv[0])):
         jsons = sorted(files["json"], key=lambda p: p.stat().st_mtime)
         htmls = sorted(files["html"], key=lambda p: p.stat().st_mtime)
         everything = jsons + htmls
@@ -210,9 +241,14 @@ def process_inbox(brief_dir, save, now=None):
             _fail(everything, failed, str(e))
             result.failed.append((json_path.name, str(e)))
             continue
-        save(brief)
+        replaced = save(brief)
         for p in [json_path, html_path] + older:
             if p is not None and p.exists():
                 _move(p, processed)
+        trade_text = fmt_trade_date(brief.trade_date)
         result.loaded.append(trade_text)
+        if replaced:
+            result.replaced.append(trade_text)
+        if brief.note:
+            result.notes.append((json_path.name, brief.note))
     return result

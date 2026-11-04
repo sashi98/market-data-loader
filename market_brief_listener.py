@@ -1,7 +1,7 @@
 # market_brief_listener.py -- TMT-MDL-US-0004
 #
 # Watches the Market Daily Brief inbox and loads each trade date's MARKET_DAILY_BRIEF_<DD-MMM-YYYY>.json
-# (+ .html) into tmt's market_daily_brief table, for the Dashboard's Market Brief tab (TMT-UI-US-0016).
+# (+ .html) into tmt's market_daily_brief table, one row per trade date (the JSON's "tradeDate"), for the Dashboard's Market Brief tab (TMT-UI-US-0016).
 # See core/market_brief/loader.py for the rules.
 #
 # Folder: DATA_MARKET_DATA_LOADER_MARKET_BRIEF_DIR in config/.env if set, else
@@ -47,7 +47,7 @@ def poll_once(env_values, brief_dir, last_waiting):
     def save(brief):
         conn = get_connection(env_values)
         try:
-            save_brief(conn, brief)
+            return save_brief(conn, brief)
         finally:
             conn.close()
 
@@ -60,8 +60,13 @@ def poll_once(env_values, brief_dir, last_waiting):
         logger.error(f"  [ERROR] Market brief pass failed, files stay in the inbox: {e}")
         return last_waiting
 
+    for name, note in result.notes:
+        logger.info(f"  [NOTE] {name}: {note}")
     for trade_date in result.loaded:
-        logger.info(f"  [OK] Market brief {trade_date} saved.")
+        if trade_date in result.replaced:
+            logger.info(f"  [OK] Market brief {trade_date} saved (replaced the earlier brief for this trade date).")
+        else:
+            logger.info(f"  [OK] Market brief {trade_date} saved.")
     for name, reason in result.failed:
         logger.warning(f"  [FAILED] {name}: {reason} (moved to failed/)")
     waiting = sorted(set(result.waiting))
