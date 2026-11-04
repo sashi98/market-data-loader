@@ -47,43 +47,44 @@
 # behavior change from full-recompute's own math. Accepted as
 # parameters purely for the log line below, keeping every runner's
 # call signature identical regardless of mode.
+#
+# MODE OF RECOMPUTE 2026-11-03 (TMT-MDL-US-0005-003) -- run() now takes mode_of_recompute (FULL | SHADOW |
+# INCREMENTAL) and delegates to core/rsi/rsi_recompute.py, shared by all three RSI runners. FULL is the
+# behaviour described above, unchanged.
 
-from core.rsi.rsi_calculator import compute_rsi14_all
-from core.rsi.rsi_persistence import fetch_bhav_copy_closes, upsert_rsi14d_workbook
-from core.rsi.rsi_continuity import fetch_trading_calendar, build_calendar_index, RsiContinuityError
 from core.indicators.persistence import record_success, record_failure
 from core.date_format import fmt_date
+from core.recompute import mode as recompute_mode
+from core.recompute import queue as recompute_queue
+from core.rsi import rsi_recompute
 
 SOURCE_TABLE = "bhav_copy_adjusted"
 TARGET_TABLE = "rsi14d_workbook"
-EXCHANGES = ["NSE", "BSE"]
+
+CONFIG = {
+    "source_table": SOURCE_TABLE,
+    "target_table": TARGET_TABLE,
+    "target": recompute_queue.TARGET_RSI14D,
+    "use_calendar": True,
+}
 
 
-def run(conn, indicator_id, start_date, end_date):
+def run(conn, indicator_id, start_date, end_date, mode_of_recompute=recompute_mode.FULL):
     """
-    Full recompute of rsi14d_workbook from bhav_copy_adjusted's entire
-    history, both exchanges, with real gap detection (see this
-    module's own header for why that's essential here specifically).
-    Returns True on success, False on failure (record_failure() already
+    Recomputes rsi14d_workbook for both exchanges in the given mode_of_recompute (see
+    core/rsi/rsi_recompute.py). Returns True on success, False on failure (record_failure() already
     called before returning).
     """
-    print(f"  [{indicator_id}] FULL recompute over {SOURCE_TABLE} "
-          f"(propagated range this cycle: {fmt_date(start_date)} to {fmt_date(end_date)}).")
-
+    mode = recompute_mode.parse_mode(mode_of_recompute)
+    print(f"  [{indicator_id}] {mode} recompute over {SOURCE_TABLE} "
+          f"(range this cycle: {fmt_date(start_date)} to {fmt_date(end_date)}).")
     try:
-        try:
-            calendar_index = build_calendar_index(fetch_trading_calendar(conn))
-        except RsiContinuityError as e:
-            raise Exception(f"Failed to build trading calendar for gap detection: {e}")
-
-        total_written = 0
-        for exchange in EXCHANGES:
-            df = fetch_bhav_copy_closes(conn, exchange)
-            if df.empty:
-                continue
-            rsi_df = compute_rsi14_all(df, calendar_index=calendar_index)
-            total_written += upsert_rsi14d_workbook(conn, rsi_df)
+        total_written = rsi_recompute.run(conn, CONFIG, indicator_id, start_date, end_date, mode)
     except Exception as e:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         print(f"  [{indicator_id}] FAILED: {e}")
         record_failure(conn, indicator_id, end_date, str(e))
         print(f"  [{indicator_id}] Flipped to DEACTIVE -- stopping.")
@@ -95,6 +96,6 @@ def run(conn, indicator_id, start_date, end_date):
     if new_max_date is not None:
         record_success(conn, indicator_id, new_max_date)
 
-    print(f"  [{indicator_id}] FULL recompute complete -- {total_written} rows written. "
+    print(f"  [{indicator_id}] {mode} recompute complete -- {total_written} rows written. "
           f"Latest date now {fmt_date(new_max_date)}.")
     return True

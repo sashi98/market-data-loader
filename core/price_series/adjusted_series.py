@@ -134,6 +134,51 @@ def fetch_raw_bhav_copy(conn, exchange, isins):
         raise AdjustedSeriesError(f"Failed to fetch raw bhav_copy for {exchange}: {e}")
 
 
+# ADDED 2026-11-03 (TMT-MDL-US-0005, mode_of_recompute=INCREMENTAL) -- the same continuity-eligible,
+# same-day-tiebroken rows as RAW_BHAV_COPY_SQL, but per isin only from its security's bookmark date onwards
+# (the stock's last stored bhav_copy_adjusted trade_date, INCLUSIVE -- the bookmark row is fetched again so
+# build_adjusted_series() can derive the first new row's prev_close from it).
+RAW_BHAV_COPY_FROM_SQL = f"""
+    WITH b AS (
+        SELECT * FROM unnest(%(isins)s::text[], %(from_dates)s::date[]) AS b(isin, from_date)
+    ),
+    ranked AS (
+        SELECT bc.isin, bc.series, bc.symbol, bc.trade_date,
+               bc.open, bc.high, bc.low, bc.close, bc.last,
+               bc.tot_trd_qty, bc.tot_trd_val, bc.total_trades,
+               {TIEBREAK_RANK_SQL}
+          FROM bhav_copy bc
+          JOIN b ON b.isin = bc.isin AND bc.trade_date >= b.from_date
+         WHERE bc.exchange = %(exchange)s
+           AND {ELIGIBLE_SERIES_EXISTS_SQL}
+           AND {MIN_LIQUIDITY_FILTER_SQL}
+    )
+    SELECT isin, series, symbol, trade_date,
+           open, high, low, close, last,
+           tot_trd_qty, tot_trd_val, total_trades
+      FROM ranked
+     WHERE continuity_rank = 1
+     ORDER BY isin, trade_date ASC
+"""
+
+
+def fetch_raw_bhav_copy_from(conn, exchange, from_date_by_isin):
+    """
+    TMT-MDL-US-0005 -- list-A (INCREMENTAL) fetch: {isin: from_date} -> raw rows with trade_date >= from_date
+    for that isin. Same eligibility / tiebreak as fetch_raw_bhav_copy().
+    """
+    if not from_date_by_isin:
+        return pd.DataFrame(columns=["isin", "series", "symbol", "trade_date", "open", "high", "low", "close",
+                                     "last", "tot_trd_qty", "tot_trd_val", "total_trades"])
+    isins = list(from_date_by_isin.keys())
+    from_dates = [from_date_by_isin[i] for i in isins]
+    try:
+        return pd.read_sql(RAW_BHAV_COPY_FROM_SQL, conn,
+                           params={"exchange": exchange, "isins": isins, "from_dates": from_dates})
+    except Exception as e:
+        raise AdjustedSeriesError(f"Failed to fetch raw bhav_copy (incremental window) for {exchange}: {e}")
+
+
 DISTINCT_ISINS_SQL = f"""
     SELECT DISTINCT bc.isin
       FROM bhav_copy bc

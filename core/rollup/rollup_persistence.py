@@ -101,54 +101,99 @@ def fetch_daily_rows(conn, exchange, from_date=None, to_date=None):
         raise RollupPersistenceError(f"Failed to fetch bhav_copy_adjusted rows for {exchange}: {e}")
 
 
+PRIOR_CLOSE_BATCH_SQL = """
+    SELECT k.security_id, r.close
+      FROM unnest(%(sids)s::text[]) AS k(security_id)
+      CROSS JOIN LATERAL (
+            SELECT close FROM {rollup_table}
+             WHERE security_id = k.security_id AND exchange = %(exchange)s AND trade_date < %(p_start)s
+             ORDER BY trade_date DESC
+             LIMIT 1
+      ) r
+"""
+
+
 def fetch_prior_close_lookup(conn, rollup_table, security_id_exchange_period_starts):
     """
-    For a batch of (security_id, exchange, period_start) keys whose
-    PRECEDING period is not part of the current call's own input (the
-    Part 2 listener's normal case -- it only ever fetches one new
-    period's worth of daily rows per call), looks up each one's prior
-    period's close directly from rollup_table itself: the most recent
-    existing row for that security_id+exchange with trade_date <
-    period_start.
+    For a batch of (security_id, exchange, period_start) keys, looks up each one's prior period's close
+    from rollup_table itself: the most recent existing row for that security_id+exchange with
+    trade_date < period_start.
 
-    Returns {(security_id, exchange, period_start): prior_close}. A key
-    with no prior row at all (the security's first-ever period in this
-    table) is simply absent from the returned dict -- prevClose
-    correctly stays NULL for it, not an error.
+    Returns {(security_id, exchange, period_start): prior_close}. A key with no prior row at all (the
+    security's first-ever period in this table) is simply absent -- prevClose stays NULL, not an error.
+
+    BATCHED 2026-11-03 (TMT-MDL-US-0005 quick win) -- was one SELECT per key, i.e. one query per security
+    per period (~1.4M queries for a full weekly rollup). Now ONE query per (exchange, period_start) group
+    via unnest + LATERAL, served by the (security_id, exchange, trade_date) unique index. Same answer.
+
+    Values are cast to float -- raw psycopg2 cursors return NUMERIC as decimal.Decimal, which once crashed
+    compute_rollup()'s percent-change subtraction ("unsupported operand type(s) for -: 'float' and
+    'decimal.Decimal'").
     """
     if not security_id_exchange_period_starts:
         return {}
 
+    groups = {}
+    for security_id, exchange, p_start in security_id_exchange_period_starts:
+        groups.setdefault((exchange, p_start), []).append(security_id)
+
     lookup = {}
+    sql = PRIOR_CLOSE_BATCH_SQL.format(rollup_table=rollup_table)
     try:
         with conn.cursor() as cur:
-            for security_id, exchange, p_start in security_id_exchange_period_starts:
-                cur.execute(
-                    f"""
-                    SELECT close FROM {rollup_table}
-                     WHERE security_id = %s AND exchange = %s AND trade_date < %s
-                     ORDER BY trade_date DESC
-                     LIMIT 1
-                    """,
-                    (security_id, exchange, p_start),
-                )
-                row = cur.fetchone()
-                if row is not None and row[0] is not None:
-                    # CAST TO float HERE -- raw psycopg2 cursors return
-                    # Postgres NUMERIC columns as Python decimal.Decimal,
-                    # unlike pd.read_sql() (used by fetch_daily_rows()
-                    # above), which auto-converts numeric columns to
-                    # float64. Without this cast, compute_rollup() ends up
-                    # subtracting a Decimal from a float64 "close" column
-                    # in _percent_change() -- "TypeError: unsupported
-                    # operand type(s) for -: 'float' and 'decimal.Decimal'"
-                    # -- confirmed via a live crash on period 2 of a
-                    # weekly rollup bootstrap (period 1 never hit this,
-                    # since it has no prior close to look up at all).
-                    lookup[(security_id, exchange, p_start)] = float(row[0])
+            for (exchange, p_start), sids in groups.items():
+                cur.execute(sql, {"sids": [str(s) for s in sids], "exchange": exchange, "p_start": p_start})
+                for security_id, close in cur.fetchall():
+                    if close is not None:
+                        lookup[(security_id, exchange, p_start)] = float(close)
     except Exception as e:
         raise RollupPersistenceError(f"Failed to fetch prior-close lookup from {rollup_table}: {e}")
     return lookup
+
+
+def fetch_daily_rows_for_securities(conn, exchange, security_ids, from_date=None, to_date=None):
+    """fetch_daily_rows() limited to the given security_ids (TMT-MDL-US-0005 list-B rebuilds)."""
+    query = ADJUSTED_ROWS_SQL + " AND security_id = ANY(%(sids)s::text[])"
+    params = {"exchange": exchange, "sids": [str(s) for s in security_ids]}
+    if from_date is not None:
+        query += " AND trade_date >= %(from_date)s"
+        params["from_date"] = from_date
+    if to_date is not None:
+        query += " AND trade_date <= %(to_date)s"
+        params["to_date"] = to_date
+    query += " ORDER BY security_id, trade_date"
+    try:
+        return pd.read_sql(query, conn, params=params)
+    except Exception as e:
+        raise RollupPersistenceError(f"Failed to fetch bhav_copy_adjusted rows for {len(security_ids)} securities/{exchange}: {e}")
+
+
+def fetch_latest_period_start(conn, rollup_table, exchange):
+    """MAX(trade_date) (= latest period start) in rollup_table for one exchange; None when empty."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT MAX(trade_date) FROM {rollup_table} WHERE exchange = %s", (exchange,))
+            row = cur.fetchone()
+            return row[0] if row and row[0] is not None else None
+    except Exception as e:
+        raise RollupPersistenceError(f"Failed to read latest period from {rollup_table} for {exchange}: {e}")
+
+
+def fetch_rollup_rows_by_keys(conn, rollup_table, exchange, security_ids, trade_dates):
+    """Stored rollup rows for the given (security_id, trade_date) pairs -- SHADOW comparison."""
+    sql = f"""
+        SELECT t.security_id, t.trade_date, t.open, t.high, t.low, t.close, t.last, t.prev_close,
+               t.tot_trd_qty, t.tot_trd_val, t.total_trades, t.ltp_percent_change
+          FROM {rollup_table} t
+          JOIN unnest(%(sids)s::text[], %(dates)s::date[]) AS k(security_id, trade_date)
+            ON k.security_id = t.security_id AND k.trade_date = t.trade_date
+         WHERE t.exchange = %(exchange)s
+    """
+    try:
+        return pd.read_sql(sql, conn, params={"exchange": exchange, "sids": [str(s) for s in security_ids],
+                                              "dates": list(trade_dates)})
+    except Exception as e:
+        raise RollupPersistenceError(f"Failed to read {rollup_table} rows for SHADOW comparison: {e}")
 
 
 UPSERT_COLUMNS = [

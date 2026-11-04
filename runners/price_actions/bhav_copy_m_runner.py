@@ -17,17 +17,20 @@
 
 from core.rollup.period import MONTHLY
 from core.rollup import rollup_runner
+from core.recompute import mode as recompute_mode
+from core.recompute import queue as recompute_queue
 
 CONFIG = {
     "period_type": MONTHLY,
     "label": "month",
     "rollup_table": "bhav_copy_m",
     "metadata_table": "bhav_copy_m_metadata",
+    "target": recompute_queue.TARGET_MONTHLY_ROLLUP,
     "run_audit_table": "bhav_copy_m_run_audit",
 }
 
 
-def run(env_values, exchange, start_date, end_date):
+def run(env_values, exchange, start_date, end_date, mode_of_recompute=recompute_mode.FULL):
     """STEP 6 -- Monthly Bhav Copy Runner, for ONE exchange."""
     print(f"STEP 6 -- Monthly Bhav Copy Runner [{exchange}]")
-    rollup_runner.run(env_values, CONFIG, exchange, start_date, end_date)
+    return rollup_runner.run(env_values, CONFIG, exchange, start_date, end_date, mode_of_recompute)
