@@ -241,6 +241,12 @@ WINDOW_END_MINUTE_IST = 0
 
 CHECK_INTERVAL_SECONDS = 900
 
+# TMT-MDL-BUG-0009 (05-Nov-2026) -- a cycle is only COMPLETE once the latest trade date's bhav copy is in
+# for every exchange. Until then STEP 2 loads whatever is published, the cycle stops before STEP 3 (no
+# heavy recompute on yesterday's data) and is retried every CHECK_INTERVAL_SECONDS. From this BMH time on,
+# the cycle stops waiting and runs with what it has, so it still finishes before the 09:00 window close.
+LAST_CHANCE_HOUR_IST = 6
+
 EXCHANGES = ["NSE", "BSE"]
 
 # The one backfill anchor every full-recompute step blindly starts from
@@ -773,6 +779,26 @@ def _clear_own_leftover_maintenance_flag(env_values):
                      "could not be cleared -- login will be blocked until it is.")
 
 
+def _exchanges_missing_latest(env_values, latest_trade_date):
+    """Exchanges whose bhav_copy_metadata has no SUCCESS row for latest_trade_date yet (read failure -> none)."""
+    try:
+        conn = get_connection(env_values)
+        try:
+            freshness = _bhav_copy_freshness_per_exchange(conn)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"  Could not re-check bhav copy freshness after STEP 2 ({e}) -- continuing the cycle.")
+        return []
+    return [ex for ex in EXCHANGES if _gap_detected(freshness[ex], latest_trade_date)]
+
+
+def _last_chance(now):
+    """True in the last hours of a cycle window (BMH, from LAST_CHANCE_HOUR_IST to the 09:00 close)."""
+    t = now.time()
+    return dtime(LAST_CHANCE_HOUR_IST, 0) <= t < dtime(WINDOW_END_HOUR_IST, WINDOW_END_MINUTE_IST)
+
+
 def check_and_process(env_values):
     """
     One full scheduler cycle -- STEPS 2 through 10. Returns True if the
@@ -924,6 +950,18 @@ def check_and_process(env_values):
                 env_values, tmt_app_base_url, token, download_dir,
                 exchange, incremental_start, latest_trade_date, ceiling_date,
             )
+
+        # TMT-MDL-BUG-0009 -- wait for the latest trade date's file before the heavy steps.
+        missing = _exchanges_missing_latest(env_values, latest_trade_date)
+        if missing and not _last_chance(datetime.now(IST)):
+            logger.info(f"\n  WAITING -- {', '.join(missing)} bhav copy for {fmt_date(latest_trade_date)} is not "
+                        f"published yet. Stopping this attempt before STEP 3 and retrying in "
+                        f"{CHECK_INTERVAL_SECONDS // 60} min; the cycle is not marked complete until it is in "
+                        f"(or until {LAST_CHANCE_HOUR_IST:02d}:00 IST, then it runs with what it has).")
+            return False
+        if missing:
+            logger.warning(f"\n  {', '.join(missing)} bhav copy for {fmt_date(latest_trade_date)} still not published "
+                           f"at the last-chance time -- running the cycle with the data available.")
 
         # STEP 3 -- Corporate Action Runner, per exchange, same
         # incremental window -- no full-history recompute (Sashikant's
@@ -1247,7 +1285,8 @@ def run():
             return
 
         logger.info(f"Bhavcopy scheduler starting -- ONE run per cycle (16:00-09:00 IST next day), "
-              f"retrying every {CHECK_INTERVAL_SECONDS // 60} min only if a cycle fails to even start. "
+              f"retrying every {CHECK_INTERVAL_SECONDS // 60} min until it completes (it waits for the latest "
+              f"bhav copy to be published). "
               f"Ctrl+C to stop.")
         last_completed_cycle_id = _load_last_completed_cycle_id(env_values)
         if last_completed_cycle_id is not None:
@@ -1298,9 +1337,9 @@ def run():
                     # docstring for why a stale value here would be
                     # actively misleading during an ongoing outage.
                     _update_scheduler_next_run_at(env_values, next_retry_at)
-                    logger.error(f"  Cycle {fmt_date(cycle_id)} failed to even start -- "
-                          f"retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at {fmt_datetime(next_retry_at)}, "
-                          f"still within this same cycle's window.")
+                    logger.error(f"  Cycle {fmt_date(cycle_id)} not complete (could not start, or the latest bhav copy "
+                          f"is not published yet) -- retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at "
+                          f"{fmt_datetime(next_retry_at)}, still within this same cycle's window.")
                     time.sleep(CHECK_INTERVAL_SECONDS)
         except KeyboardInterrupt:
             logger.info("\nShutting down.")
