@@ -194,6 +194,7 @@
 
 import argparse
 import concurrent.futures
+import gc
 import sys
 import time
 from datetime import date, datetime, timedelta, timezone
@@ -705,6 +706,7 @@ def _run_indicator(env_values, indicator_id, start_date, end_date):
               f"handling) -- skipping this indicator for the rest of this cycle: {e}")
     finally:
         conn.close()
+        gc.collect()   # hand this indicator's DataFrames back before the next one starts
 
 
 def print_summary(cycle_summary, activated_indicators, elapsed_seconds):
@@ -1000,7 +1002,17 @@ def check_and_process(env_values):
         # the original max_workers=1 design already used.
         if activated_indicators:
             logger.info("\nSTEP 8 -- Indicator Runner Loop")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            # TMT-MDL-US-0005 (04-Nov-2026): while any step runs in SHADOW, each runner holds the INCREMENTAL
+            # result in memory on top of the FULL one; two indicators at a time then ran the dev laptop out of
+            # memory (ma50d / ma200d "out of memory", rsi14d / rsi14w "connection already closed"). One at a
+            # time in SHADOW; two at a time otherwise, as before.
+            gc.collect()   # release what steps 4-6 left behind before the heaviest step
+            shadow_on = any(recompute_mode.mode_of_recompute(env_values, step) == recompute_mode.SHADOW
+                            for step in recompute_mode.ENV_KEYS)
+            indicator_workers = 1 if shadow_on else 2
+            logger.info(f"  Running {len(activated_indicators)} indicator(s), {indicator_workers} at a time"
+                        + (" (a step is in SHADOW)." if shadow_on else "."))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=indicator_workers) as executor:
                 futures = [
                     executor.submit(_run_indicator, env_values, indicator_id, DEFAULT_START_DATE, latest_trade_date)
                     for indicator_id in activated_indicators
