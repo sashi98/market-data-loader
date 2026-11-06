@@ -235,7 +235,10 @@ IST = timezone(timedelta(hours=5, minutes=30))
 # Active window: 16:00 IST (AMH start) through 09:00 IST the next
 # calendar day (BMH end) -- reverted to the original 09:00 close (see
 # this file's own header, "WINDOW CLOSE TIME REVERTED").
-WINDOW_START_HOUR_IST = 16
+# MOVED 2026-11-06 from 16:00 to 17:00 (Sashikant): the exchanges publish around 16:30-16:45 and he wants TMT
+# synced by the time he is back from office (~20:00); a cycle takes ~2 h. A later publish is still handled
+# by the wait-for-the-file retry (TMT-MDL-BUG-0009).
+WINDOW_START_HOUR_IST = 17
 WINDOW_END_HOUR_IST = 9
 WINDOW_END_MINUTE_IST = 0
 
@@ -300,12 +303,17 @@ RUNNERS = {
 }
 
 
+def _hour_label(hour):
+    """17 -> '5:00 PM', 9 -> '9:00 AM'."""
+    return f"{(hour - 1) % 12 + 1}:00 {'AM' if hour < 12 else 'PM'}"
+
+
 def _cycle_id_for(now):
     """
     The date identifying which cycle `now` falls in -- the calendar date
-    of that cycle's OWN 16:00 AMH start -- or None if `now` isn't inside
+    of that cycle's OWN WINDOW_START_HOUR_IST (17:00) AMH start -- or None if `now` isn't inside
     any cycle window at all (the dead zone between this morning's 09:00
-    BMH close and today's 16:00 AMH open).
+    BMH close and today's 17:00 AMH open).
     """
     t = now.time()
     if t >= dtime(WINDOW_START_HOUR_IST, 0):
@@ -316,7 +324,7 @@ def _cycle_id_for(now):
 
 
 def _seconds_until_next_window_open(now):
-    """Seconds until the next upcoming 16:00 IST, strictly after `now`."""
+    """Seconds until the next upcoming WINDOW_START_HOUR_IST (17:00 IST), strictly after `now`."""
     next_open = now.replace(hour=WINDOW_START_HOUR_IST, minute=0, second=0, microsecond=0)
     if next_open <= now:
         next_open += timedelta(days=1)
@@ -329,7 +337,7 @@ def _load_last_completed_cycle_id(env_values):
     version of this function. Reads scheduler_last_cycle_completed_at
     from the maintenance_status DB row (see get_scheduler_cycle_state())
     and derives that cycle's own cycle_id from it via _cycle_id_for(),
-    the same date-of-the-cycle's-own-16:00-AMH-start identity the file
+    the same date-of-the-cycle's-own-AMH-start identity the file
     used to store directly -- valid because a cycle's completion always
     falls inside that same cycle's own window.
 
@@ -410,8 +418,8 @@ def _update_scheduler_next_run_at(env_values, next_run_at):
 def _ceiling_date(now):
     """
     The most recent calendar date whose bhav copy could plausibly
-    already be published. At/after 16:00 IST (AMH) that's today; before
-    16:00 IST (the whole BMH morning span) it's still yesterday. A raw
+    already be published. At/after 17:00 IST (AMH) that's today; before
+    17:00 IST (the whole BMH morning span) it's still yesterday. A raw
     calendar date -- may land on a weekend or holiday; see
     _latest_trade_date() for the trading-day-aware value everything else
     in this file actually uses.
@@ -1226,10 +1234,11 @@ def _log_cycle_idle_message(cycle_id, now, sleep_seconds):
         f"  Cycle for {fmt_date(cycle_id)} completed — system will remain idle "
         f"until the next run window opens in ~{hours_until_next_run} hours. The "
         f"next scheduler run will occur during After Market Hours (AMH) on "
-        f"{fmt_date(amh_date)} between 4:00 PM – 11:59 PM IST, or if missed, "
+        f"{fmt_date(amh_date)} between {_hour_label(WINDOW_START_HOUR_IST)} – 11:59 PM IST, or if missed, "
         f"during Before Market Hours (BMH) on {fmt_date(bmh_date)} between "
         f"12:00 AM – 9:00 AM IST. Each cycle executes only once per day, valid "
-        f"from today's AMH (4:00 PM IST) until tomorrow's BMH (9:00 AM IST)."
+        f"from today's AMH ({_hour_label(WINDOW_START_HOUR_IST)} IST) until tomorrow's BMH "
+        f"({_hour_label(WINDOW_END_HOUR_IST)} IST)."
     )
 
 
@@ -1284,7 +1293,8 @@ def run():
                     _save_last_completed_cycle_id(env_values, cycle_id)
             return
 
-        logger.info(f"Bhavcopy scheduler starting -- ONE run per cycle (16:00-09:00 IST next day), "
+        logger.info(f"Bhavcopy scheduler starting -- ONE run per cycle ({WINDOW_START_HOUR_IST:02d}:00-"
+              f"{WINDOW_END_HOUR_IST:02d}:00 IST next day), "
               f"retrying every {CHECK_INTERVAL_SECONDS // 60} min until it completes (it waits for the latest "
               f"bhav copy to be published). "
               f"Ctrl+C to stop.")
@@ -1300,7 +1310,8 @@ def run():
                     sleep_seconds = _seconds_until_next_window_open(now)
                     next_run_at = now + timedelta(seconds=sleep_seconds)
                     _update_scheduler_next_run_at(env_values, next_run_at)
-                    logger.info(f"  Between cycles (this morning's 09:00 close, today's 16:00 open) -- sleeping "
+                    logger.info(f"  Between cycles (this morning's {WINDOW_END_HOUR_IST:02d}:00 close, today's "
+                          f"{WINDOW_START_HOUR_IST:02d}:00 open) -- sleeping "
                           f"{round(sleep_seconds / 60, 1)} min.")
                     time.sleep(sleep_seconds)
                     continue
