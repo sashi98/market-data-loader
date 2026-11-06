@@ -16,7 +16,8 @@
 #                          whole-history recompute, those stocks only.
 #                  Fallback to a whole-history recompute of that one stock (logged as A_FALLBACK) when the
 #                  short walk could differ from FULL: no stored row yet (new stock), anchor still before the
-#                  RSI seed, a missing prev_close, or (daily) a trading-calendar gap that FULL would reseed at.
+#                  RSI seed, anchor averages too small for the stored decimals (a stock flat for months), a missing
+#                  prev_close, or (daily) a trading-calendar gap that FULL would reseed at.
 #                Queue ALL (whole exchange) or an empty workbook -> FULL for that exchange.
 #   SHADOW       FULL is written; the INCREMENTAL result is computed first, in memory, and compared with the
 #                rows FULL wrote -> recompute_shadow_check + a verdict line.
@@ -44,6 +45,8 @@ from core.rsi.rsi_persistence import upsert_rsi_workbook
 
 EXCHANGES = ["NSE", "BSE"]
 A_FALLBACK = "A_FALLBACK"
+# Below this the stored (10-decimal) averages may no longer carry FULL's ratio -> whole-history recompute.
+TINY_AVERAGE = 1e-6
 FULL_HISTORY_BATCH = 300
 
 OUTPUT_COLUMNS = ["security_id", "isin", "exchange", "series", "symbol", "trade_date",
@@ -144,6 +147,12 @@ def walk_from_anchor(group, calendar_index):
     if pd.isna(first["anchor_date"]) or pd.isna(first["anchor_avg_gain"]) or pd.isna(first["anchor_avg_loss"]):
         return None
     avg_gain, avg_loss = float(first["anchor_avg_gain"]), float(first["anchor_avg_loss"])
+    if avg_gain + avg_loss < TINY_AVERAGE:
+        # A stock whose price has not moved for months: Wilder's averages decay by 13/14 a day until they are
+        # below the stored 10 decimals and come back as 0 / 0 (RSI NULL), while FULL still holds the tiny
+        # unrounded values and their ratio (e.g. RSI 41.94). Recompute such a stock in full. (06-Nov-2026,
+        # INE965H01011 on BSE.)
+        return None
     prev_date = first["anchor_date"]
     rows = []
     for r in group.itertuples(index=False):
