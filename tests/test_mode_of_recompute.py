@@ -124,6 +124,9 @@ def test_rsi_walk_from_anchor_matches_full():
     assert walk_from_anchor(pre, cal) is None
     gap = new.copy(); gap["anchor_date"] = full.at[k - 6, "trade_date"]
     assert walk_from_anchor(gap, cal) is None
+    # averages decayed below the stored decimals (stock flat for months) -> fallback, not RSI NULL
+    flat = new.copy(); flat["anchor_avg_gain"] = 0.0; flat["anchor_avg_loss"] = 0.0
+    assert walk_from_anchor(flat, cal) is None
 
 
 if __name__ == "__main__":
