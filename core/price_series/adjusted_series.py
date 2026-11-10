@@ -252,18 +252,19 @@ def chunk_isins_by_security(isins, lineage_map, batch_size=DEFAULT_SECURITY_BATC
     return batches
 
 
+# TMT-MDL-BUG-0011 -- every price-adjusting action with a usable factor, whatever its
+# reconciliation_status (MATCHED / NSE_ONLY / BSE_ONLY / CONFLICT). See core/corporate_actions/adjustment.py.
 MATCHED_CORPORATE_ACTIONS_SQL = """
     SELECT isin, ex_date, adjustment_factor
       FROM corporate_actions
-     WHERE reconciliation_status = 'MATCHED'
-       AND adjustment_factor IS NOT NULL
+     WHERE adjustment_factor IS NOT NULL
 """
 
 
 def fetch_matched_corporate_actions(conn):
     """
-    Every MATCHED corporate action with a trusted adjustment_factor,
-    isin-keyed -- exchange-agnostic by design (a single action's factor
+    Every corporate action with a usable adjustment_factor (any
+    reconciliation_status -- TMT-MDL-BUG-0011), isin-keyed -- exchange-agnostic by design (a single action's factor
     applies identically to every exchange the isin trades on; ISIN
     itself is a depository-level identifier, not exchange-level -- same
     as the old ADJUSTMENT_FACTOR_JOIN_SQL never filtered by exchange

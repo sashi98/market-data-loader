@@ -123,7 +123,7 @@ def run(env_values, exchange, start_date, end_date):
     newly_matched_total = len(summary["newly_matched_keys"]) if summary else 0
     print(f"  [{status if status == 'SUCCESS' else 'FAILED'}] {exchange}: "
           f"{summary[parsed_count_key] if summary else 0} row(s) persisted, "
-          f"{newly_matched_total} newly MATCHED this cycle.")
+          f"{newly_matched_total} newly applied (factor available) this cycle.")
 
     return {
         "outcome": "OK" if status == "SUCCESS" else "FAILED",
