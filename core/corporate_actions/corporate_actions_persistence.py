@@ -353,7 +353,8 @@ def reconcile(conn, touched_keys):
     both-computable ratios).
 
     Returns the list of (isin, action_type, ex_date) keys that newly
-    became MATCHED (with a usable adjustment_factor) in THIS call, which
+    got a usable adjustment_factor (any status -- TMT-MDL-BUG-0011:
+    every factor is applied to prices, not only MATCHED) in THIS call, which
     is exactly the set corporate_actions_loader.py should trigger a
     targeted RSI reprocess for -- a key that was already MATCHED before
     this run is deliberately excluded, so re-running the loader over an
@@ -393,8 +394,17 @@ def reconcile(conn, touched_keys):
                     nse_confirmed, bse_confirmed = True, True
                     symbol = nse_row["symbol"] or bse_row["symbol"]
                     if agree is False:
+                        # TMT-MDL-BUG-0011 -- still a price-changing event both
+                        # exchanges reported: apply NSE's factor (BSE's if NSE has
+                        # none) and flag it, never leave the price unadjusted.
                         status = RECONCILIATION_CONFLICT
-                        factor = None
+                        factor = (
+                            _factor_from_face_values(nse_row["face_value_old"], nse_row["face_value_new"])
+                            or _factor_from_face_values(bse_row["face_value_old"], bse_row["face_value_new"])
+                        )
+                        print(f"  [WARN] corporate action CONFLICT {symbol} {action_type} ex {ex_date}: "
+                              f"NSE '{nse_row['raw_ratio_text']}' vs BSE '{bse_row['raw_ratio_text']}' "
+                              f"-- applying factor {factor}")
                     else:
                         # agree is True, or None (one/both sides
                         # unparseable) -- either way both exchanges
@@ -424,13 +434,18 @@ def reconcile(conn, touched_keys):
 
                 cur.execute(
                     """
-                    SELECT id, reconciliation_status FROM corporate_actions
+                    SELECT id, reconciliation_status, adjustment_factor FROM corporate_actions
                      WHERE isin = %s AND ex_date = %s AND action_type = %s
                     """,
                     (isin, ex_date, action_type),
                 )
                 existing = cur.fetchone()
-                was_already_matched = existing is not None and existing[1] == RECONCILIATION_MATCHED
+                # TMT-MDL-BUG-0011 -- "already applied" = a factor was already stored (any status).
+                was_already_applied = existing is not None and existing[2] is not None
+
+                if factor is None:
+                    print(f"  [WARN] corporate action {symbol} {action_type} ex {ex_date} ({status}): "
+                          f"ratio not parsed -- price NOT adjusted until a factor is available")
 
                 if existing:
                     cur.execute(
@@ -454,7 +469,7 @@ def reconcile(conn, touched_keys):
                         (isin, symbol, action_type, ex_date, factor, nse_confirmed, bse_confirmed, status),
                     )
 
-                if status == RECONCILIATION_MATCHED and factor is not None and not was_already_matched:
+                if factor is not None and not was_already_applied:
                     newly_matched_keys.append((isin, action_type, ex_date))
     except Exception as e:
         raise CorporateActionsPersistenceError(f"Reconciliation failed: {e}")

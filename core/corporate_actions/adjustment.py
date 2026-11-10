@@ -9,10 +9,14 @@
 # changelog comment (tmt/src/main/resources/db/changelog) for the full
 # design rationale.
 #
-# Only MATCHED rows with a non-NULL adjustment_factor are ever applied
-# automatically -- NSE_ONLY/BSE_ONLY/CONFLICT rows require manual
-# confirmation first (promoting them to MATCHED via a real second-source
-# match, or a manual DB correction) before they affect any RSI number.
+# TMT-MDL-BUG-0011 (2026-11-10): EVERY row with a non-NULL
+# adjustment_factor is applied, whatever its reconciliation_status
+# (MATCHED / NSE_ONLY / BSE_ONLY / CONFLICT). A split or bonus changes the
+# price numerically whether one exchange or both reported it; the old
+# MATCHED-only rule left e.g. CONCORDBIO's 1:1 bonus (ex 04-Nov-2026,
+# NSE_ONLY) unapplied, doubling its pre-bonus prices in every indicator.
+# reconciliation_status is now information only; the factor itself is
+# chosen in corporate_actions_persistence.reconcile().
 #
 # A single isin can have MULTIPLE corporate actions over its history
 # (e.g. two separate bonus issues) -- the cumulative factor for a given
@@ -48,7 +52,6 @@ ADJUSTMENT_FACTOR_JOIN_SQL = """
                 FILTER (WHERE ca.ex_date >= bc.trade_date)) AS prev_close_factor
           FROM corporate_actions ca
          WHERE ca.isin = bc.isin
-           AND ca.reconciliation_status = 'MATCHED'
            AND ca.adjustment_factor IS NOT NULL
     ) adj ON TRUE
 """

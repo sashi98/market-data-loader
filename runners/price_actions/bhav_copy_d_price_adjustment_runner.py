@@ -302,13 +302,13 @@ def run(env_values, exchange, start_date, end_date, mode_of_recompute=recompute_
 
     run_started_at = time.time()
     try:
-        print("\n[4.1] Fetching security_identity_lineage and MATCHED corporate actions ...")
+        print("\n[4.1] Fetching security_identity_lineage and price-adjusting corporate actions ...")
         try:
             lineage_map = fetch_isin_lineage_map(conn)
             actions_df = fetch_matched_corporate_actions(conn)
         except AdjustedSeriesError as e:
             raise PriceAdjustmentError(f"Failed to fetch lineage/actions: {e}")
-        print(f"  [OK] {len(lineage_map)} lineage bridge(s), {len(actions_df)} MATCHED corporate action(s) loaded.")
+        print(f"  [OK] {len(lineage_map)} lineage bridge(s), {len(actions_df)} price-adjusting corporate action(s) loaded (any reconciliation status).")
 
         try:
             print(f"\n[4.2] Planning {exchange} (continuity-eligible isins, STEP 3A classification) ...")
