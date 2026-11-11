@@ -69,6 +69,8 @@
 import time
 from datetime import datetime as _dt, timedelta
 
+from decimal import Decimal, ROUND_HALF_UP
+
 import pandas as pd
 
 from core.date_format import fmt_date
@@ -86,6 +88,19 @@ from core.rollup.rollup_persistence import (
 
 LIST_B_BATCH_SIZE = 300
 STORED_PRICE_DECIMALS = 2   # bhav_copy_w / bhav_copy_m prices are NUMERIC(20, 2)
+_STORED_PRICE_QUANTUM = Decimal("0.01")
+
+
+def stored_price(value):
+    """
+    The value Postgres keeps when this float is written to a NUMERIC(20, 2) column: psycopg2 sends the float's
+    shortest repr (44.025 -> '44.025') and NUMERIC rounds half away from zero (44.03). Python's round() works
+    on the binary float (44.02499...) and gives 44.02 -- a 1-paisa difference that showed up on 11-Nov-2026 for
+    the first corporate-action rebuilds (split / bonus-adjusted closes land on half-paisa values).
+    """
+    if value is None or pd.isna(value):
+        return float("nan")
+    return float(Decimal(repr(float(value))).quantize(_STORED_PRICE_QUANTUM, rounding=ROUND_HALF_UP))
 
 SHADOW_VALUE_COLUMNS = ["open", "high", "low", "close", "last", "prev_close", "tot_trd_qty", "tot_trd_val",
                         "total_trades", "ltp_percent_change"]
@@ -194,7 +209,7 @@ def _compute_periods_in_memory(conn, config, exchange, periods, end_date):
             continue
         rollup_df = computed[0]
         frames.append(rollup_df)
-        carried.update({sid: round(float(c), STORED_PRICE_DECIMALS)
+        carried.update({sid: stored_price(c)
                         for sid, c in zip(rollup_df["security_id"], rollup_df["close"]) if pd.notna(c)})
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -216,7 +231,7 @@ def _rebuild_securities(conn, config, exchange, security_ids, start_date, end_da
         if df.empty:
             continue
         rollup_df = compute_rollup(df, config["period_type"])
-        stored_close = rollup_df["close"].astype(float).round(STORED_PRICE_DECIMALS)
+        stored_close = rollup_df["close"].astype(float).map(stored_price)
         rollup_df["prev_close"] = stored_close.groupby([rollup_df["security_id"], rollup_df["exchange"]]).shift(1)
         rollup_df["ltp_percent_change"] = _percent_change(rollup_df["close"].astype(float), rollup_df["prev_close"])
         if write:
