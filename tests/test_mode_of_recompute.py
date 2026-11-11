@@ -13,6 +13,7 @@ from core.recompute import shadow
 from core.price_series import classification as c
 from core.rollup.period import WEEKLY, period_start
 from core.rollup.rollup_calculator import compute_rollup, _percent_change
+from core.rollup.rollup_runner import stored_price
 
 
 def test_parse_mode():
@@ -74,7 +75,7 @@ def _daily(sid, days, closes):
 def test_rollup_list_b_matches_full():
     """list-B whole-history rebuild == FULL's period-by-period walk (prior close read back rounded to 2dp)."""
     days = list(pd.bdate_range("2026-09-01", "2026-10-30").date)
-    closes = [100 + i * 0.333 for i in range(len(days))]
+    closes = [44.025 + i * 0.005 for i in range(len(days))]   # half-paisa closes (split / bonus-adjusted)
     df = _daily("S1", days, closes)
 
     # FULL: one period at a time, prior close = stored (rounded) close of the previous period
@@ -83,13 +84,13 @@ def test_rollup_list_b_matches_full():
         part = df[df["trade_date"].map(lambda d: period_start(d, WEEKLY)) == p]
         lookup = {("S1", "NSE", p): stored["S1"]} if "S1" in stored else {}
         out = compute_rollup(part, WEEKLY, prior_close_lookup=lookup)
-        stored["S1"] = round(float(out["close"].iloc[0]), 2)
+        stored["S1"] = stored_price(out["close"].iloc[0])   # what Postgres NUMERIC(20, 2) keeps
         full_rows.append(out)
     full = pd.concat(full_rows, ignore_index=True)
 
     # list-B: whole history at once, same fix-up as rollup_runner._rebuild_securities()
     reb = compute_rollup(df, WEEKLY)
-    reb["prev_close"] = reb["close"].astype(float).round(2).groupby([reb["security_id"], reb["exchange"]]).shift(1)
+    reb["prev_close"] = reb["close"].astype(float).map(stored_price).groupby([reb["security_id"], reb["exchange"]]).shift(1)
     reb["ltp_percent_change"] = _percent_change(reb["close"].astype(float), reb["prev_close"])
 
     r = shadow.compare(reb, full, ["security_id", "trade_date"], ["close", "prev_close", "ltp_percent_change"])
@@ -127,6 +128,11 @@ def test_rsi_walk_from_anchor_matches_full():
     # averages decayed below the stored decimals (stock flat for months) -> fallback, not RSI NULL
     flat = new.copy(); flat["anchor_avg_gain"] = 0.0; flat["anchor_avg_loss"] = 0.0
     assert walk_from_anchor(flat, cal) is None
+
+
+def test_stored_price_matches_postgres_numeric():
+    assert stored_price(44.025) == 44.03 and stored_price(-1.005) == -1.01 and stored_price(2.675) == 2.68
+    assert round(44.025, 2) == 44.02   # why stored_price exists
 
 
 if __name__ == "__main__":
