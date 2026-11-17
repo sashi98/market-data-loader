@@ -15,7 +15,7 @@ from datetime import timedelta
 
 from core.ma.ma_calculator import compute_ma
 from core.ma.ma_persistence import fetch_closes_for_ma, upsert_ma_workbook
-from core.indicators.persistence import record_success, record_failure
+from core.indicators.persistence import record_success, record_failure, covered_through
 from core.date_format import fmt_date
 
 WINDOW = 200
@@ -60,7 +60,7 @@ def run(conn, indicator_id, start_date, end_date):
         cur.execute(f"SELECT MAX(trade_date) FROM {target_table}")
         new_max_date = cur.fetchone()[0]
     if new_max_date is not None:
-        record_success(conn, indicator_id, new_max_date)
+        record_success(conn, indicator_id, covered_through(indicator_id, new_max_date, end_date))
 
     print(f"  [{indicator_id}] FULL recompute complete -- {total_written} rows written. "
           f"Latest date now {fmt_date(new_max_date)}.")
