@@ -182,6 +182,50 @@ def test_m9_unknown_file_goes_to_failed():
     assert result.failed and (d / "failed" / "notes.txt.reason.txt").exists()
 
 
+
+# TMT-MDL-BUG-0014 -- the 7 AM pre-market edition carries its date in latestTradeDate (no tradeDate / asOfDate).
+PRE_MARKET = {"edition": "pre-market-7am", "latestTradeDate": "2026-11-16",
+              "title": "India Market Dashboard - Morning Pre-Market & Overnight Brief",
+              "reportPublishedDateTime": "Tuesday, 17 November 2026 · 7:00 AM IST"}
+SAMPLE_DIR = Path(__file__).resolve().parent / "fixtures" / "market_brief"
+
+
+def test_m14_latest_trade_date_identifies_the_brief():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_16-NOV-2026.json", json.dumps(PRE_MARKET), age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert result.loaded == ["16-NOV-2026"] and not result.failed and not result.notes
+    assert saved[0].trade_date == date(2026, 11, 16) and saved[0].edition == "pre-market-7am"
+
+
+def test_m15_latest_trade_date_must_agree_with_other_dates():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_16-NOV-2026.json", json.dumps(dict(PRE_MARKET, asOfDate="2026-11-17")),
+           age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert not saved and "latestTradeDate" in result.failed[0][1] and "disagree" in result.failed[0][1]
+    # tradeDate still comes first when both are present and agree
+    _write(d, "MARKET_DAILY_BRIEF_16-NOV-2026.json", json.dumps(dict(PRE_MARKET, tradeDate="16-NOV-2026")),
+           age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert saved and saved[0].trade_date == date(2026, 11, 16)
+
+
+def test_m16_no_date_at_all_names_all_three_keys():
+    d = _dir()
+    _write(d, "MARKET_DAILY_BRIEF_16-NOV-2026.json", json.dumps({"edition": "pre-market-7am"}), age=HTML_GRACE_SECONDS + 5)
+    result, saved = _run(d)
+    assert not saved and "latestTradeDate" in result.failed[0][1]
+
+
+def test_m17_real_pre_market_sample_loads():
+    # the real 16-NOV-2026 file that prod rejected; pins the new format so a loader change can't break it again
+    b = build_brief(SAMPLE_DIR / "MARKET_DAILY_BRIEF_16-NOV-2026.json")
+    assert b.trade_date == date(2026, 11, 16) and b.edition == "pre-market-7am" and b.note is None
+    payload = json.loads(b.payload_text)
+    for key in ("reportPublishedDateTime", "overnightDevelopments", "sectorsInFocusToday", "derivativesTracker"):
+        assert key in payload, key
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
