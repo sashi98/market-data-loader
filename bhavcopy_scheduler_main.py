@@ -807,6 +807,29 @@ def _last_chance(now):
     return dtime(LAST_CHANCE_HOUR_IST, 0) <= t < dtime(WINDOW_END_HOUR_IST, WINDOW_END_MINUTE_IST)
 
 
+# TMT-MDL-BUG-0010 -- after a stack restart the scheduler is often up before the backend: retry an unreachable login
+# every LOGIN_RETRY_SECONDS for up to LOGIN_STARTUP_ATTEMPTS tries (~5 min) instead of waiting the whole
+# CHECK_INTERVAL_SECONDS (15 min). Any other login failure is not retried here.
+LOGIN_RETRY_SECONDS = 30
+LOGIN_STARTUP_ATTEMPTS = 10
+
+
+def _login_waiting_for_backend(env_values, attempts=LOGIN_STARTUP_ATTEMPTS, delay_seconds=LOGIN_RETRY_SECONDS,
+                               sleep=time.sleep):
+    """auth_client.login(), retried while the backend is unreachable. Returns the token or raises AuthError."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return auth_client.login(
+                env_values["TMT_APP_BASE_URL"], env_values["TMT_ADMIN_USER_ID"], env_values["TMT_ADMIN_PASSWORD"]
+            )
+        except auth_client.BackendUnreachableError as e:
+            if attempt == attempts:
+                raise
+            logger.info(f"  Backend not reachable yet (attempt {attempt} of {attempts}) -- retrying the login in "
+                        f"{delay_seconds}s. {e}")
+            sleep(delay_seconds)
+
+
 def check_and_process(env_values):
     """
     One full scheduler cycle -- STEPS 2 through 10. Returns True if the
@@ -864,9 +887,7 @@ def check_and_process(env_values):
     # login included, so logging in after flipping the flag would lock
     # the scheduler out on its own first step.
     try:
-        token = auth_client.login(
-            env_values["TMT_APP_BASE_URL"], env_values["TMT_ADMIN_USER_ID"], env_values["TMT_ADMIN_PASSWORD"]
-        )
+        token = _login_waiting_for_backend(env_values)
     except auth_client.AuthError as e:
         logger.error(f"  [FAILED] Could not authenticate -- skipping this cycle: {e}")
         return False

@@ -22,6 +22,15 @@ class AuthError(Exception):
     pass
 
 
+class BackendUnreachableError(AuthError):
+    """
+    TMT-MDL-BUG-0010 -- the login endpoint could not be reached at all (connection refused / timed out, or a
+    502 / 503 / 504 gateway page with no JSON): the backend is most likely still starting. Worth retrying soon,
+    unlike a real login failure (bad credentials, maintenance message, missing ADMIN role).
+    """
+    pass
+
+
 def prompt_credentials():
     """Prompts for admin userId and password (password input masked)."""
     print("\nAdmin authentication required (needed for /api/holidays/sync/{year}).")
@@ -45,11 +54,15 @@ def login(tmt_app_base_url, user_id, password):
     try:
         response = requests.post(url, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
     except requests.exceptions.RequestException as e:
-        raise AuthError(f"Could not reach TMT login endpoint at {url}. Error: {e}")
+        raise BackendUnreachableError(f"Could not reach TMT login endpoint at {url}. Error: {e}")
 
     try:
         body = response.json()
     except ValueError:
+        if response.status_code in (502, 503, 504):
+            raise BackendUnreachableError(
+                f"Login endpoint at {url} answered HTTP {response.status_code} with no JSON (backend still starting?)."
+            )
         raise AuthError(
             f"Login endpoint at {url} returned a non-JSON response "
             f"(HTTP {response.status_code})."
