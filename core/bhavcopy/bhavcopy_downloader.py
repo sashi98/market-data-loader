@@ -21,6 +21,8 @@ from datetime import date
 
 import requests
 
+from core.browser_identity import BROWSER_USER_AGENT, FIREWALL_HINT, is_firewall_block
+
 from core.date_format import fmt_date
 
 CONNECT_TIMEOUT_SECONDS = 30
@@ -56,10 +58,8 @@ BSE_URL_PATTERN = "https://www.bseindia.com/download/BhavCopy/Equity/BhavCopy_BS
 # for these until that's added (see backlog).
 BSE_LEGACY_URL_PATTERN = "https://www.bseindia.com/download/BhavCopy/Equity/BSE_EQ_BHAVCOPY_{DDMMYYYY}.ZIP"
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+# TMT-MDL-BUG-0008: one shared, current browser User-Agent (BSE's firewall rejects outdated ones).
+USER_AGENT = BROWSER_USER_AGENT
 
 
 class BhavCopyNotFoundError(Exception):
@@ -193,6 +193,7 @@ def download_bhavcopy(exchange, trade_date, download_dir):
     if response.status_code != 200:
         raise BhavCopyDownloadError(
             f"HTTP {response.status_code} received from {exchange} for {fmt_date(trade_date)}. URL: {download_url}"
+            + (f" ({FIREWALL_HINT})" if is_firewall_block(response) else "")
         )
 
     # -- HTML-body check -- BSE (confirmed) sometimes returns its own
