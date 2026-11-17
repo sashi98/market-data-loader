@@ -26,15 +26,15 @@ import io
 
 import requests
 
+from core.browser_identity import BROWSER_USER_AGENT, FIREWALL_HINT, is_firewall_block
+
 from core.date_format import fmt_date
 
 CONNECT_TIMEOUT_SECONDS = 30
 READ_TIMEOUT_SECONDS = 60
 
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+# TMT-MDL-BUG-0008: one shared, current browser User-Agent (BSE's firewall rejects outdated ones).
+USER_AGENT = BROWSER_USER_AGENT
 
 NSE_HOME_URL = "https://www.nseindia.com/"
 NSE_CORPORATE_ACTIONS_URL = "https://www.nseindia.com/api/corporates-corporateActions"
@@ -120,6 +120,7 @@ def download_nse_corporate_actions(from_date, to_date):
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from NSE corporate actions API for {fmt_date(from_date)} to {fmt_date(to_date)}."
+            + (f" ({FIREWALL_HINT})" if is_firewall_block(response) else "")
         )
 
     try:
@@ -170,6 +171,7 @@ def download_bse_corporate_actions(from_date, to_date):
     if response.status_code != 200:
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from BSE corporate actions API for {fmt_date(from_date)} to {fmt_date(to_date)}."
+            + (f" ({FIREWALL_HINT})" if is_firewall_block(response) else "")
         )
 
     try:
@@ -277,6 +279,7 @@ def download_nse_corporate_actions_csv(from_date, to_date):
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from NSE corporate actions CSV endpoint "
             f"for {fmt_date(from_date)} to {fmt_date(to_date)}."
+            + (f" ({FIREWALL_HINT})" if is_firewall_block(response) else "")
         )
 
     return _parse_csv_response_text(response.content, "NSE", from_date, to_date)
@@ -333,9 +336,10 @@ def download_bse_corporate_actions_csv(from_date, to_date):
         )
 
     if response.status_code != 200:
+        hint = f" ({FIREWALL_HINT})" if is_firewall_block(response) else ""
         raise CorporateActionsDownloadError(
             f"HTTP {response.status_code} received from BSE corporate actions CSV endpoint "
-            f"for {fmt_date(from_date)} to {fmt_date(to_date)}."
+            f"for {fmt_date(from_date)} to {fmt_date(to_date)}.{hint}"
         )
 
     return _parse_csv_response_text(response.content, "BSE", from_date, to_date)
