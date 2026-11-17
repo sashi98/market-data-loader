@@ -66,6 +66,8 @@ CONFIG = {
     "target_table": TARGET_TABLE,
     "target": recompute_queue.TARGET_RSI14D,
     "use_calendar": True,
+    # TMT-US-0024: also compute and store rsi_sma14 (RSI-based smoothing line, SMA 14 of RSI 14)
+    "sma_window": 14,
 }
 
 

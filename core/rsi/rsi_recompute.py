@@ -52,6 +52,11 @@ FULL_HISTORY_BATCH = 300
 OUTPUT_COLUMNS = ["security_id", "isin", "exchange", "series", "symbol", "trade_date",
                   "gain", "loss", "avg_gain", "avg_loss", "rsi14"]
 SHADOW_VALUE_COLUMNS = ["gain", "loss", "avg_gain", "avg_loss", "rsi14"]
+# TMT-US-0024: RSI-SMA (TradingView's RSI-based smoothing line) -- configs with "sma_window" (rsi14d: 14) also
+# compute and store rsi_sma14 = mean of the stock's last `sma_window` RSI values, its own row included; NULL unless
+# all of them exist and are non-NULL. Uses the stored 2-decimal RSI, so FULL and INCREMENTAL agree exactly.
+SMA_COLUMN = "rsi_sma14"
+SMA_TOLERANCE = 0.0001
 SHADOW_TOLERANCES = {"gain": 0.0001, "loss": 0.0001, "avg_gain": 0.0001, "avg_loss": 0.0001,
                      # RSI14 itself is rounded to 2 decimals (rsi_math._round2): allow one rounding step
                      "rsi14": 0.0101}
@@ -137,6 +142,51 @@ def _fetch_exchange(conn, cfg, exchange):
         """, conn, params={"exchange": exchange})
 
 
+def add_rsi_sma(rsi_df, window):
+    """FULL rule: rsi_sma14 over each stock's whole series in date order (in place on a copy; returns it)."""
+    df = rsi_df.sort_values(["security_id", "trade_date"]).reset_index(drop=True)
+    rsi = pd.to_numeric(df["rsi14"], errors="coerce")
+    df[SMA_COLUMN] = rsi.groupby(df["security_id"]).transform(
+        lambda s: s.rolling(window, min_periods=window).mean())
+    return df
+
+
+def _fetch_prior_rsi(conn, cfg, exchange, anchor_by_sid, window):
+    """The last (window - 1) stored rsi14 values of each walked stock up to its anchor date (index-backed LIMIT)."""
+    if not anchor_by_sid:
+        return pd.DataFrame(columns=["security_id", "trade_date", "rsi14"])
+    sids = list(anchor_by_sid.keys())
+    return pd.read_sql(
+        f"""
+        SELECT k.security_id, w.trade_date, w.rsi14
+          FROM unnest(%(sids)s::text[], %(anchors)s::date[]) AS k(security_id, anchor_date)
+          CROSS JOIN LATERAL (
+                SELECT t.trade_date, t.rsi14
+                  FROM {cfg['target_table']} t
+                 WHERE t.security_id = k.security_id AND t.exchange = %(exchange)s AND t.trade_date <= k.anchor_date
+                 ORDER BY t.trade_date DESC
+                 LIMIT %(n)s
+          ) w
+        """, conn, params={"sids": sids, "anchors": [anchor_by_sid[s] for s in sids], "exchange": exchange,
+                           "n": window - 1})
+
+
+def sma_for_walked(walked_df, prior_df, window):
+    """INCREMENTAL rule: rolling mean over [stored prior RSI + walked RSI]; returns walked_df with rsi_sma14 set."""
+    if walked_df.empty:
+        return walked_df.assign(**{SMA_COLUMN: pd.Series(dtype=float)})
+    prior = prior_df[["security_id", "trade_date", "rsi14"]].assign(_walked=False)
+    rows = walked_df[["security_id", "trade_date", "rsi14"]].assign(_walked=True)
+    both = pd.concat([prior, rows], ignore_index=True)
+    both["trade_date"] = pd.to_datetime(both["trade_date"])
+    both = add_rsi_sma(both, window)
+    sma = both[both["_walked"]][["security_id", "trade_date", SMA_COLUMN]]
+    out = walked_df.copy()
+    out["_td"] = pd.to_datetime(out["trade_date"])
+    out = out.merge(sma.rename(columns={"trade_date": "_td"}), on=["security_id", "_td"], how="left")
+    return out.drop(columns=["_td"])
+
+
 def walk_from_anchor(group, calendar_index):
     """
     Continue Wilder's average from the stock's anchor over its new rows. Returns the output rows, or None
@@ -174,6 +224,7 @@ def compute_incremental(conn, cfg, exchange, since, list_b, calendar_index):
     """INCREMENTAL result for one exchange (no writes): (DataFrame, list_a_count, fallback_count)."""
     anchored = _fetch_anchored_rows(conn, cfg, exchange, since)
     walked, full_sids, whole_history_frames = [], set(list_b), []
+    anchor_by_sid = {}
     list_a_count = 0
     if not anchored.empty:
         for sid, group in anchored.groupby("security_id", sort=False):
@@ -188,32 +239,46 @@ def compute_incremental(conn, cfg, exchange, since, list_b, calendar_index):
                 full_sids.add(sid)
             else:
                 walked.extend(rows)
+                anchor_by_sid[sid] = group.iloc[0]["anchor_date"]
                 list_a_count += 1
     fallback_count = len(full_sids) - len(set(list_b)) + len(whole_history_frames)
     if full_sids:
         whole_history_frames.append(_fetch_full_history(conn, cfg, exchange, full_sids))
-    frames = [pd.DataFrame(walked, columns=OUTPUT_COLUMNS)] if walked else []
+    window = cfg.get("sma_window")
+    columns = OUTPUT_COLUMNS + ([SMA_COLUMN] if window else [])
+    frames = []
+    if walked:
+        walked_df = pd.DataFrame(walked, columns=OUTPUT_COLUMNS)
+        if window:
+            walked_df = sma_for_walked(walked_df, _fetch_prior_rsi(conn, cfg, exchange, anchor_by_sid, window), window)
+        frames.append(walked_df[columns])
     history = pd.concat([f for f in whole_history_frames if not f.empty], ignore_index=True) \
         if any(not f.empty for f in whole_history_frames) else pd.DataFrame()
     if not history.empty:
-        frames.append(compute_rsi14_all(history, calendar_index=calendar_index)[OUTPUT_COLUMNS])
-    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=OUTPUT_COLUMNS)
+        full = compute_rsi14_all(history, calendar_index=calendar_index)
+        if window:
+            full = add_rsi_sma(full, window)
+        frames.append(full[columns])
+    result = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=columns)
     return result, list_a_count, fallback_count
 
 
 def _compare(conn, cfg, exchange, candidate, cycle_trade_date, list_a_count, list_b_count):
+    sma_select = f", w.{SMA_COLUMN}" if cfg.get("sma_window") else ""
     actual = pd.DataFrame()
     if not candidate.empty:
         actual = pd.read_sql(
             f"""
-            SELECT w.security_id, w.trade_date, w.gain, w.loss, w.avg_gain, w.avg_loss, w.rsi14
+            SELECT w.security_id, w.trade_date, w.gain, w.loss, w.avg_gain, w.avg_loss, w.rsi14{sma_select}
               FROM {cfg['target_table']} w
               JOIN unnest(%(sids)s::text[], %(dates)s::date[]) AS k(security_id, trade_date)
                 ON k.security_id = w.security_id AND k.trade_date = w.trade_date
              WHERE w.exchange = %(exchange)s
             """, conn, params={"exchange": exchange, "sids": candidate["security_id"].astype(str).tolist(),
                                "dates": candidate["trade_date"].tolist()})
-    result = shadow.compare(candidate, actual, ["security_id", "trade_date"], SHADOW_VALUE_COLUMNS, SHADOW_TOLERANCES)
+    value_columns = SHADOW_VALUE_COLUMNS + ([SMA_COLUMN] if cfg.get("sma_window") else [])
+    tolerances = {**SHADOW_TOLERANCES, SMA_COLUMN: SMA_TOLERANCE}
+    result = shadow.compare(candidate, actual, ["security_id", "trade_date"], value_columns, tolerances)
     print(f"  {shadow.record(conn, cycle_trade_date, cfg['target'], exchange, result, list_a_count, list_b_count)}")
 
 
@@ -254,7 +319,10 @@ def run(conn, cfg, indicator_id, start_date, end_date, mode_of_recompute):
             df = _fetch_exchange(conn, cfg, exchange)
             if df.empty:
                 continue
-            total_written += upsert_rsi_workbook(conn, cfg["target_table"], compute_rsi14_all(df, calendar_index=calendar_index))
+            full = compute_rsi14_all(df, calendar_index=calendar_index)
+            if cfg.get("sma_window"):
+                full = add_rsi_sma(full, cfg["sma_window"])
+            total_written += upsert_rsi_workbook(conn, cfg["target_table"], full)
         else:
             result, list_a_count, fallback_count = compute_incremental(conn, cfg, exchange, since, list_b, calendar_index)
             written = upsert_rsi_workbook(conn, cfg["target_table"], result) if not result.empty else 0

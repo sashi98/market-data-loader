@@ -211,23 +211,18 @@ def upsert_rsi_workbook(conn, target_table, rsi_df):
     (see compute_rsi14_all()'s output shape) -- a DataFrame without one
     will raise a KeyError here rather than silently write a broken row.
     """
+    # TMT-US-0024: rsi_sma14 (daily RSI-based smoothing line) is written when the frame carries it (rsi14d only).
+    columns = ["security_id", "isin", "exchange", "series", "symbol", "trade_date", "gain", "loss", "avg_gain", "avg_loss", "rsi14"]
+    if "rsi_sma14" in rsi_df.columns:
+        columns.append("rsi_sma14")
+    updates = ",\n            ".join(f"{c} = EXCLUDED.{c}" for c in columns if c not in ("security_id", "exchange", "trade_date"))
     upsert_sql = f"""
-        INSERT INTO {target_table} (security_id, isin, exchange, series, symbol, trade_date, gain, loss, avg_gain, avg_loss, rsi14)
+        INSERT INTO {target_table} ({", ".join(columns)})
         VALUES %s
         ON CONFLICT (security_id, exchange, trade_date) DO UPDATE SET
-            isin = EXCLUDED.isin,
-            series = EXCLUDED.series,
-            symbol = EXCLUDED.symbol,
-            gain = EXCLUDED.gain,
-            loss = EXCLUDED.loss,
-            avg_gain = EXCLUDED.avg_gain,
-            avg_loss = EXCLUDED.avg_loss,
-            rsi14 = EXCLUDED.rsi14
+            {updates}
     """
-    raw_values = (
-        rsi_df[["security_id", "isin", "exchange", "series", "symbol", "trade_date", "gain", "loss", "avg_gain", "avg_loss", "rsi14"]]
-        .itertuples(index=False, name=None)
-    )
+    raw_values = rsi_df[columns].itertuples(index=False, name=None)
     values = [
         tuple(None if isinstance(v, float) and pd.isna(v) else v for v in row)
         for row in raw_values
