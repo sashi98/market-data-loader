@@ -802,3 +802,44 @@ def reconcile_stale_scheduler_lock(conn, max_age_seconds=MAX_SCHEDULER_CYCLE_SEC
     # can never clobber a genuinely-running enrichment_running flag.
     set_scheduler_running(conn, False)
     return True
+
+
+def clear_scheduler_lock_at_startup(conn):
+    """
+    TMT-MDL-BUG-0013 / BUG-0005 -- a freshly started bhavcopy_scheduler_main.py clears any scheduler_running it finds,
+    whatever its age. There is exactly ONE scheduler per environment (one container on prod / UAT, one manual
+    process on dev), so a lock that exists when a new process starts can only have been left by a predecessor that
+    was killed mid-cycle (deploy restart, OOM, power loss). reconcile_stale_scheduler_lock()'s 6-hour rule left the
+    app locked for hours after every such restart (15-Nov-2026: a deploy at 23:41 locked prod until cleared by hand).
+
+    Do not start a second scheduler (e.g. `--once` in the same environment) while one is mid-cycle: it would clear
+    the running one's lock. Clears through set_scheduler_running(False), so enrichment_running is never touched.
+    Returns the lock's scheduler_started_at when one was cleared (for the log), else None.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT scheduler_running, scheduler_started_at FROM maintenance_status WHERE id = 1")
+            row = cur.fetchone()
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to read the scheduler lock at startup: {e}")
+    if not row or not row[0]:
+        return None
+    set_scheduler_running(conn, False)
+    return row[1] or datetime.now()
+
+
+def clear_enrichment_lock_at_startup(conn):
+    """
+    TMT-MDL-BUG-0005 -- same as clear_scheduler_lock_at_startup(), for stock_universe_update_listener.py's
+    enrichment_running (one listener per environment). Returns enrichment_started_at when a lock was cleared, else None.
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT enrichment_running, enrichment_started_at FROM maintenance_status WHERE id = 1")
+            row = cur.fetchone()
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to read the enrichment lock at startup: {e}")
+    if not row or not row[0]:
+        return None
+    set_enrichment_running(conn, False)
+    return row[1] or datetime.now()

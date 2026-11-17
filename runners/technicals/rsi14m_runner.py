@@ -10,7 +10,7 @@
 # INCREMENTAL) and delegates to core/rsi/rsi_recompute.py, shared by all three RSI runners. FULL is the
 # behaviour described above, unchanged.
 
-from core.indicators.persistence import record_success, record_failure
+from core.indicators.persistence import record_success, record_failure, covered_through
 from core.date_format import fmt_date
 from core.recompute import mode as recompute_mode
 from core.recompute import queue as recompute_queue
@@ -52,7 +52,7 @@ def run(conn, indicator_id, start_date, end_date, mode_of_recompute=recompute_mo
         cur.execute(f"SELECT MAX(trade_date) FROM {TARGET_TABLE}")
         new_max_date = cur.fetchone()[0]
     if new_max_date is not None:
-        record_success(conn, indicator_id, new_max_date)
+        record_success(conn, indicator_id, covered_through(indicator_id, new_max_date, end_date))
 
     print(f"  [{indicator_id}] {mode} recompute complete -- {total_written} rows written. "
           f"Latest date now {fmt_date(new_max_date)}.")

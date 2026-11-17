@@ -49,6 +49,8 @@
 # indicator_id in a loop.
 
 
+from datetime import timedelta
+
 from core.date_format import fmt_date
 
 
@@ -351,3 +353,25 @@ def fetch_complete_trade_dates_between(conn, start_date, end_date):
             return [row[0] for row in cur.fetchall()]
     except Exception as e:
         raise IndicatorsPersistenceError(f"Failed to fetch complete trade dates between {fmt_date(start_date)} and {fmt_date(end_date)}: {e}")
+
+
+def covered_through(indicator_id, new_max_date, end_date):
+    """
+    TMT-MDL-BUG-0013 -- the date an indicator run really covers, for record_success().
+
+    Weekly / monthly workbooks key each bar by its period START (rsi14w "09-NOV" holds the week through 13-NOV), so
+    recording MAX(trade_date) made STEP 7 see every W/M indicator as behind the latest trade date on every cycle --
+    weekends with no new data included -- and enter maintenance for about an hour each time. When the newest W/M bar
+    is the period that contains end_date, the run covered end_date: record that. Daily indicators (and a W/M run whose
+    newest bar is an older period) keep new_max_date. Timeframe = the id's last letter (rsi14w, ma50m, ma9d).
+    """
+    if new_max_date is None or end_date is None:
+        return new_max_date
+    timeframe = str(indicator_id)[-1:].lower()
+    if timeframe == "w":
+        period_start = end_date - timedelta(days=end_date.weekday())
+    elif timeframe == "m":
+        period_start = end_date.replace(day=1)
+    else:
+        return new_max_date
+    return max(new_max_date, end_date) if new_max_date >= period_start else new_max_date

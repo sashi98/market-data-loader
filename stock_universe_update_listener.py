@@ -129,6 +129,7 @@ from core.stock_universe.persistence import (
     fetch_last_processed_cursor, fetch_isin_exchange_map,
     update_stock_fundamentals, normalize_field_value, record_enrichment_run,
     record_enrichment_audit_rows, set_enrichment_running, is_scheduler_running, StockUniversePersistenceError,
+    clear_enrichment_lock_at_startup,
 )
 from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_DELAY_SECONDS
 from core.stock_universe.tradingview_client import fetch_fundamentals_tradingview, TRADINGVIEW_COVERABLE_FIELDS
@@ -932,6 +933,20 @@ def run():
         except EnvValidationError as e:
             logger.error(f"[FAILED] {e}")
             sys.exit(1)
+
+        # TMT-MDL-BUG-0005: one listener per environment, so an enrichment_running lock found now was left by a
+        # predecessor killed mid-batch. Clear it so the app is not stuck in maintenance.
+        try:
+            conn = get_connection(env_values)
+            try:
+                left_since = clear_enrichment_lock_at_startup(conn)
+            finally:
+                conn.close()
+            if left_since is not None:
+                logger.warning(f"[RECOVERED] enrichment_running was left on by a previous listener process (set at "
+                               f"{left_since:%d-%b-%Y %H:%M}) that stopped mid-batch. Cleared it at startup.")
+        except (DbConnectionError, StockUniversePersistenceError) as e:
+            logger.warning(f"Could not check for a leftover enrichment lock at startup: {e} -- continuing anyway.")
 
         if args.once:
             logger.info("Stock Universe enrichment listener -- running a single poll cycle (--once), then exiting.")

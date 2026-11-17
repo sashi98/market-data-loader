@@ -210,7 +210,7 @@ from core.indicators.persistence import (
     fetch_iwm_freshness, activate_indicator, deactivate_indicator, IndicatorsPersistenceError,
 )
 from core.stock_universe.persistence import (
-    set_scheduler_running, is_enrichment_running, reconcile_stale_scheduler_lock, MAX_SCHEDULER_CYCLE_SECONDS,
+    set_scheduler_running, is_enrichment_running, clear_scheduler_lock_at_startup,
     get_scheduler_cycle_state, set_scheduler_last_cycle_completed_at, set_scheduler_next_run_at,
     StockUniversePersistenceError,
 )
@@ -1258,29 +1258,23 @@ def run():
             logger.error(f"[FAILED] {e}")
             sys.exit(1)
 
-        # ADDED 2026-09-16 -- one-time startup check for a stale
-        # scheduler_running lock left behind by a previous instance of
-        # THIS SAME process that was killed hard (SIGKILL, OOM, power
-        # loss, terminal closed) before it could reach its own
-        # check_and_process() finally block. See
-        # reconcile_stale_scheduler_lock()'s own docstring for why this
-        # only ever runs once here, at startup, never mid-loop.
+        # TMT-MDL-BUG-0013 / BUG-0005: one scheduler per environment, so a scheduler_running lock found now was left
+        # by a predecessor killed mid-cycle (deploy restart, OOM, power loss). Clear it whatever its age (the old
+        # 6-hour rule kept prod locked for hours after every mid-cycle restart); this run redoes the cycle itself.
         try:
             conn = get_connection(env_values)
             try:
-                healed = reconcile_stale_scheduler_lock(conn)
+                left_since = clear_scheduler_lock_at_startup(conn)
             finally:
                 conn.close()
-            if healed:
+            if left_since is not None:
                 logger.warning(
-                    f"[RECOVERED] Found a stale scheduler_running lock (older than "
-                    f"{MAX_SCHEDULER_CYCLE_SECONDS // 3600}h) at startup -- a previous run must have been "
-                    f"killed before it could clean up after itself. Cleared it so the app isn't stuck showing "
-                    f"maintenance mode to every user. If this keeps happening, find out why the process keeps "
-                    f"dying mid-cycle."
+                    f"[RECOVERED] scheduler_running was left on by a previous scheduler process (set at "
+                    f"{left_since:%d-%b-%Y %H:%M}) that stopped mid-cycle. Cleared it at startup -- only one scheduler "
+                    f"runs per environment -- so the app is not stuck in maintenance; this run redoes the cycle."
                 )
         except (DbConnectionError, StockUniversePersistenceError) as e:
-            logger.warning(f"Could not check for a stale scheduler lock at startup: {e} -- continuing anyway.")
+            logger.warning(f"Could not check for a leftover scheduler lock at startup: {e} -- continuing anyway.")
 
         _wait_for_stock_universe_ready(env_values)
 
