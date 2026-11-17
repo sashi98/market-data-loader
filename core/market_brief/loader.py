@@ -11,9 +11,10 @@
 #   - a .json waits up to HTML_GRACE_SECONDS for its .html (the two downloads land seconds apart), then loads
 #     alone;
 #   - an .html with no .json waits (it is never loaded on its own);
-#   - a brief is identified by the trade date INSIDE the JSON: "tradeDate" ("28-OCT-2026"; "2026-10-28" also read)
-#     first, else "asOfDate". The file name's date is only used to pair the .json with its .html; if it differs
-#     from the JSON's date, the JSON wins (noted in the log). A brief whose tradeDate and asOfDate disagree fails;
+#   - a brief is identified by the trade date INSIDE the JSON: "tradeDate" ("28-OCT-2026"; "2026-10-28" also read),
+#     else "latestTradeDate" (the 7 AM pre-market edition, TMT-MDL-BUG-0014), else "asOfDate". The file name's date
+#     is only used to pair the .json with its .html; if it differs from the JSON's date, the JSON wins (noted in the
+#     log). A brief whose date fields disagree with each other fails;
 #   - checks: valid JSON object, a trade date as above, "edition" present;
 #   - good -> one upsert on trade_date (the table's primary key): several uploads for the same trade date, on the
 #     same day or later, replace the row -- the last one loaded wins. Within one poll, briefs are saved oldest file
@@ -34,6 +35,8 @@ FILE_RE = re.compile(r"^MARKET_DAILY_BRIEF_(\d{2}-[A-Za-z]{3}-\d{4})(?: \(\d+\))
 PARTIAL_SUFFIXES = (".crdownload", ".part", ".tmp", ".download")
 STABLE_SECONDS = 10
 HTML_GRACE_SECONDS = 120
+# Where a brief's trade date can be, in order of preference (latestTradeDate: 7 AM edition, TMT-MDL-BUG-0014).
+DATE_KEYS = ("tradeDate", "latestTradeDate", "asOfDate")
 
 UPSERT_SQL = """
     INSERT INTO market_daily_brief
@@ -123,17 +126,18 @@ def build_brief(json_path, html_path=None):
         raise BriefError(f"{json_path.name} is not valid JSON: {e}")
     if not isinstance(payload, dict):
         raise BriefError(f"{json_path.name} must hold one JSON object")
-    # The brief's identity: tradeDate in the JSON, else asOfDate.
-    trade = _json_date(payload.get("tradeDate"), "tradeDate", json_path.name)
-    as_of = _json_date(payload.get("asOfDate"), "asOfDate", json_path.name)
-    if trade and as_of and trade != as_of:
-        raise BriefError(f"{json_path.name}: tradeDate {fmt_trade_date(trade)} and asOfDate {as_of.isoformat()} disagree")
-    trade_date = trade or as_of
-    if trade_date is None:
-        raise BriefError(f"{json_path.name} has no tradeDate (DD-MMM-YYYY) or asOfDate (YYYY-MM-DD)")
+    # The brief's identity: the first of DATE_KEYS present in the JSON; all present ones must agree.
+    found_dates = [(k, d) for k in DATE_KEYS if (d := _json_date(payload.get(k), k, json_path.name)) is not None]
+    if not found_dates:
+        raise BriefError(f"{json_path.name} has no tradeDate (DD-MMM-YYYY), latestTradeDate or asOfDate (YYYY-MM-DD)")
+    date_key, trade_date = found_dates[0]
+    for k, d in found_dates[1:]:
+        if d != trade_date:
+            raise BriefError(f"{json_path.name}: {date_key} {fmt_trade_date(trade_date)} and {k} "
+                             f"{fmt_trade_date(d)} disagree")
     note = None
     if trade_date != name_date:
-        note = (f"file name says {fmt_trade_date(name_date)} but the JSON's {'tradeDate' if trade else 'asOfDate'} "
+        note = (f"file name says {fmt_trade_date(name_date)} but the JSON's {date_key} "
                 f"is {fmt_trade_date(trade_date)}; saved as {fmt_trade_date(trade_date)}")
     edition = payload.get("edition")
     if not isinstance(edition, str) or not edition.strip():

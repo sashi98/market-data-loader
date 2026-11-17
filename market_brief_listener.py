@@ -1,7 +1,7 @@
 # market_brief_listener.py -- TMT-MDL-US-0004
 #
 # Watches the Market Daily Brief inbox and loads each trade date's MARKET_DAILY_BRIEF_<DD-MMM-YYYY>.json
-# (+ .html) into tmt's market_daily_brief table, one row per trade date (the JSON's "tradeDate"), for the Dashboard's Market Brief tab (TMT-UI-US-0016).
+# (+ .html) into tmt's market_daily_brief table, one row per trade date (the JSON's "tradeDate", else "latestTradeDate", else "asOfDate"), for the Dashboard's Market Brief tab (TMT-UI-US-0016).
 # See core/market_brief/loader.py for the rules.
 #
 # Folder: DATA_MARKET_DATA_LOADER_MARKET_BRIEF_DIR in config/.env if set, else

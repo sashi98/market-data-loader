@@ -1,0 +1,920 @@
+{
+  "edition": "pre-market-7am",
+  "latestTradeDate": "2026-11-16",
+  "title": "India Market Dashboard - Morning Pre-Market & Overnight Brief",
+  "reportPublishedDateTime": "Tuesday, 17 November 2026 · 7:00 AM IST (Pre-Market & Overnight Macro Edition · Covering Confirmed Indian Close of Mon 16 Nov 2026)",
+  "marketOverview": {
+    "nifty50": {
+      "value": 25291.1,
+      "change": 146.8,
+      "changePct": 0.58,
+      "note": "India's benchmark Nifty 50 advanced 146.80 points (+0.58%) to settle at 25,291.10 on Monday, led by strong buying in banking, FMCG, and heavyweights as global investor interest shifted toward Indian equities.",
+      "history": [
+        {
+          "date": "16 Nov",
+          "value": 25291.1,
+          "changePct": 0.58
+        },
+        {
+          "date": "13 Nov",
+          "value": 25144.3,
+          "changePct": -0.61
+        },
+        {
+          "date": "12 Nov",
+          "value": 25299.35,
+          "changePct": 0.18
+        }
+      ]
+    },
+    "sensex": {
+      "value": 82102.85,
+      "change": 510.4,
+      "changePct": 0.63,
+      "note": "The BSE Sensex rallied 510.40 points (+0.63%) to close at 82,102.85, reclaiming the 82,100 mark as blue-chip stocks spearheaded a strong start to the week.",
+      "history": [
+        {
+          "date": "16 Nov",
+          "value": 82102.85,
+          "changePct": 0.63
+        },
+        {
+          "date": "13 Nov",
+          "value": 81592.45,
+          "changePct": -0.39
+        },
+        {
+          "date": "12 Nov",
+          "value": 81911.01,
+          "changePct": 0.04
+        }
+      ]
+    },
+    "indiaVix": {
+      "value": 15.7,
+      "change": 0.2,
+      "changePct": 1.29,
+      "note": "Market volatility rose slightly by 1.29% to 15.70 on Monday amid mixed global cues and domestic inflation tracking.",
+      "history": [
+        {
+          "date": "16 Nov",
+          "value": 15.7,
+          "changePct": 1.29
+        },
+        {
+          "date": "13 Nov",
+          "value": 15.5,
+          "changePct": -6.75
+        },
+        {
+          "date": "12 Nov",
+          "value": 16.62,
+          "changePct": -5.47
+        }
+      ]
+    },
+    "fiiDiiFlows": {
+      "fiiCr": 5736.55,
+      "diiCr": -2253.58,
+      "note": "Official cash-segment figures (16 Nov): Foreign Institutional Investors (FIIs) bought a net ₹5,736.55 crore, while Domestic Institutional Investors (DIIs) sold ₹2,253.58 crore."
+    },
+    "advanceDecline": {
+      "advances": 1399,
+      "declines": 2807,
+      "unchanged": 169,
+      "ratio": 0.5,
+      "note": "Despite headline index gains, broader market breadth was weak on BSE with 1,399 advancing shares against 2,807 declines, as midcaps (-0.51%) and smallcaps (-1.10%) faced selling pressure."
+    }
+  },
+  "globalMarkets": {
+    "commodities": {
+      "brentCrude": {
+        "price": 95.0,
+        "changePct": -2.71
+      },
+      "wtiCrude": {
+        "price": 88.0,
+        "changePct": -1.12
+      },
+      "naturalGas": {
+        "price": 3.18,
+        "changePct": -1.85
+      },
+      "gold": {
+        "price": 3820.5,
+        "changePct": -1.41
+      },
+      "silver": {
+        "price": 48.3,
+        "changePct": -3.76
+      }
+    },
+    "usTreasury30y": {
+      "yieldPct": 5.45,
+      "changeBps": -3
+    },
+    "currency": {
+      "usdInr": {
+        "rate": 93.95,
+        "trend": "Stronger — the Indian Rupee appreciated to ₹93.95/USD as foreign capital inflows and easing crude oil prices supported domestic currency."
+      },
+      "dollarIndex": {
+        "value": "103.10 (-0.25%)",
+        "note": "The US Dollar Index eased to 103.10, providing relief to emerging-market currencies and commodities."
+      }
+    },
+    "usClose": [
+      {
+        "index": "Dow Jones Industrial Average",
+        "level": 52410.2,
+        "changePct": 0.12
+      },
+      {
+        "index": "S&P 500",
+        "level": 7580.15,
+        "changePct": 0.24
+      },
+      {
+        "index": "Nasdaq Composite",
+        "level": 25250.4,
+        "changePct": 0.45
+      }
+    ],
+    "asiaPacific": [
+      {
+        "index": "Nikkei 225 (Japan)",
+        "level": 60890.1,
+        "changePct": -0.41
+      },
+      {
+        "index": "Shanghai Composite (China)",
+        "level": 3648.2,
+        "changePct": 0.38
+      },
+      {
+        "index": "Hang Seng (Hong Kong)",
+        "level": 23810.5,
+        "changePct": 0.73
+      },
+      {
+        "index": "KOSPI (South Korea)",
+        "level": 5460.15,
+        "changePct": 0.51
+      },
+      {
+        "index": "Taiwan Weighted",
+        "level": 44400.2,
+        "changePct": 0.56
+      },
+      {
+        "index": "ASX 200 (Australia)",
+        "level": 9095.4,
+        "changePct": 0.15
+      }
+    ],
+    "trendNote": "Between yesterday 9:00 AM IST and today 7:00 AM IST, global markets turned positive as US equities advanced (Nasdaq +0.45%) and Brent crude oil softened toward $95/barrel amid easing geopolitical risk premiums. For Indian industries, lower crude prices provide relief for airlines, paint makers, and fuel retailers, while stable Asian markets support a constructive opening for domestic equities."
+  },
+  "sectorRotation": {
+    "asOfLabel": "16 Nov Close",
+    "sectors": [
+      {
+        "name": "Nifty FMCG",
+        "changePct": 1.87
+      },
+      {
+        "name": "Nifty Bank",
+        "changePct": 0.85
+      },
+      {
+        "name": "Nifty Financial Services",
+        "changePct": 0.72
+      },
+      {
+        "name": "Nifty Energy",
+        "changePct": 0.55
+      },
+      {
+        "name": "Nifty IT",
+        "changePct": 0.35
+      },
+      {
+        "name": "Nifty Pharma",
+        "changePct": -0.15
+      },
+      {
+        "name": "Nifty Auto",
+        "changePct": -0.85
+      },
+      {
+        "name": "Nifty Metal",
+        "changePct": -1.5
+      },
+      {
+        "name": "Nifty Realty",
+        "changePct": -1.34
+      },
+      {
+        "name": "Nifty PSU Bank",
+        "changePct": -0.2,
+        "estimated": true
+      },
+      {
+        "name": "Nifty Private Bank",
+        "changePct": 0.65,
+        "estimated": true
+      },
+      {
+        "name": "Nifty Consumer Durables",
+        "changePct": -0.4
+      },
+      {
+        "name": "Nifty Media",
+        "changePct": -0.3,
+        "estimated": true
+      },
+      {
+        "name": "Nifty Oil & Gas",
+        "changePct": 0.4,
+        "estimated": true
+      }
+    ],
+    "breadthNote": "Monday's rally was led by defensive and heavyweight buying, with Nifty FMCG (+1.87%) and Nifty Bank leading gains, while Metal (-1.50%) and Realty (-1.34%) lagged."
+  },
+  "sectorPositioning": {
+    "leading": [
+      "Nifty Bank",
+      "Nifty FMCG",
+      "Nifty Financial Services",
+      "Nifty Energy"
+    ],
+    "improving": [
+      "Nifty IT",
+      "Nifty Private Bank",
+      "Nifty Oil & Gas",
+      "Nifty Pharma"
+    ],
+    "weakening": [
+      "Nifty PSU Bank",
+      "Nifty Consumer Durables",
+      "Nifty Media"
+    ],
+    "lagging": [
+      "Nifty Realty",
+      "Nifty Auto",
+      "Nifty Metal"
+    ]
+  },
+  "bestWorstSectors": [
+    {
+      "rank": "best1",
+      "sectorName": "Nifty FMCG",
+      "changePct": 1.87,
+      "caption": "FMCG surged 1.87% as heavy buying in ITC (+3.54%) and Tata Consumer Products (+3.57%) propelled defensive consumer staples.",
+      "constituents": [
+        {
+          "name": "ITC",
+          "weightPct": 31.2
+        },
+        {
+          "name": "Hindustan Unilever",
+          "weightPct": 21.4
+        },
+        {
+          "name": "Nestle India",
+          "weightPct": 8.9
+        },
+        {
+          "name": "Tata Consumer Products",
+          "weightPct": 7.4
+        },
+        {
+          "name": "Varun Beverages",
+          "weightPct": 6.8
+        },
+        {
+          "name": "Britannia Industries",
+          "weightPct": 6.2
+        },
+        {
+          "name": "Godrej Consumer Products",
+          "weightPct": 5.3
+        },
+        {
+          "name": "Dabur India",
+          "weightPct": 4.4
+        },
+        {
+          "name": "Marico",
+          "weightPct": 4.3
+        },
+        {
+          "name": "Colgate-Palmolive (India)",
+          "weightPct": 4.1
+        }
+      ]
+    },
+    {
+      "rank": "best2",
+      "sectorName": "Nifty Bank",
+      "changePct": 0.85,
+      "caption": "Banking stocks gained 0.85% supported by institutional buying in major private and public lenders.",
+      "constituents": [
+        {
+          "name": "HDFC Bank",
+          "weightPct": 29.5
+        },
+        {
+          "name": "ICICI Bank",
+          "weightPct": 23.2
+        },
+        {
+          "name": "State Bank of India",
+          "weightPct": 11.4
+        },
+        {
+          "name": "Axis Bank",
+          "weightPct": 10.8
+        },
+        {
+          "name": "Kotak Mahindra Bank",
+          "weightPct": 7.5
+        },
+        {
+          "name": "IndusInd Bank",
+          "weightPct": 4.2
+        },
+        {
+          "name": "Bank of Baroda",
+          "weightPct": 3.5
+        },
+        {
+          "name": "Punjab National Bank",
+          "weightPct": 2.8
+        },
+        {
+          "name": "Federal Bank",
+          "weightPct": 2.4
+        },
+        {
+          "name": "IDFC First Bank",
+          "weightPct": 1.7
+        }
+      ]
+    },
+    {
+      "rank": "worst1",
+      "sectorName": "Nifty Metal",
+      "changePct": -1.5,
+      "caption": "Metal stocks dropped 1.50% as global commodity softness weighed on Tata Steel (-2.81%) and Hindalco.",
+      "constituents": [
+        {
+          "name": "Tata Steel",
+          "weightPct": 24.1
+        },
+        {
+          "name": "Hindalco Industries",
+          "weightPct": 18.5
+        },
+        {
+          "name": "JSW Steel",
+          "weightPct": 17.8
+        },
+        {
+          "name": "Vedanta",
+          "weightPct": 10.2
+        },
+        {
+          "name": "Jindal Steel & Power",
+          "weightPct": 8.4
+        },
+        {
+          "name": "NMDC",
+          "weightPct": 6.1
+        },
+        {
+          "name": "Steel Authority of India (SAIL)",
+          "weightPct": 5.2
+        },
+        {
+          "name": "National Aluminium Company",
+          "weightPct": 4.1
+        },
+        {
+          "name": "APL Apollo Tubes",
+          "weightPct": 3.2
+        },
+        {
+          "name": "Ratnamani Metals & Tubes",
+          "weightPct": 2.4
+        }
+      ]
+    },
+    {
+      "rank": "worst2",
+      "sectorName": "Nifty Realty",
+      "changePct": -1.34,
+      "caption": "Realty stocks fell 1.34% amid broad profit booking in property shares.",
+      "constituents": [
+        {
+          "name": "DLF",
+          "weightPct": 29.95
+        },
+        {
+          "name": "Macrotech Developers (Lodha)",
+          "weightPct": 19.1
+        },
+        {
+          "name": "Phoenix Mills",
+          "weightPct": 12.64
+        },
+        {
+          "name": "Prestige Estates Projects",
+          "weightPct": 11.38
+        },
+        {
+          "name": "Oberoi Realty",
+          "weightPct": 10.34
+        },
+        {
+          "name": "Godrej Properties",
+          "weightPct": 8.81
+        },
+        {
+          "name": "Brigade Enterprises",
+          "weightPct": 2.91
+        },
+        {
+          "name": "Anant Raj",
+          "weightPct": 2.7
+        },
+        {
+          "name": "Sobha",
+          "weightPct": 2.18
+        },
+        {
+          "name": "Signatureglobal (India)",
+          "weightPct": 1.5
+        }
+      ]
+    }
+  ],
+  "topMovers": {
+    "gainers": [
+      {
+        "name": "Max Healthcare Institute",
+        "changePct": 6.63
+      },
+      {
+        "name": "Tata Consumer Products",
+        "changePct": 3.57
+      },
+      {
+        "name": "ITC",
+        "changePct": 3.54
+      }
+    ],
+    "losers": [
+      {
+        "name": "Tata Motors Passenger Vehicles",
+        "changePct": -8.7
+      },
+      {
+        "name": "Tata Steel",
+        "changePct": -2.81
+      },
+      {
+        "name": "Maruti Suzuki India",
+        "changePct": -2.36
+      }
+    ]
+  },
+  "newsSentiment": {
+    "paragraphs": [
+      {
+        "heading": "1. Monday Session Recap: Nifty climbs 147 points to 25,291; FIIs buy ₹5,737 Cr",
+        "body": "Indian benchmark indices staged a robust recovery on Monday, 16 November, as the <b>Nifty 50 rose 146.80 points (+0.58%) to close at 25,291.10</b> and the <b>Sensex surged 510.40 points (+0.63%) to 82,102.85</b>. Buying was heavily concentrated in large-cap heavyweights, banking, and FMCG stocks, while midcaps and smallcaps faced mild profit-taking. Foreign Institutional Investors (FIIs) remained strong net buyers, injecting a net <b>₹5,736.55 crore</b> into cash equities."
+      },
+      {
+        "heading": "2. Overnight Macro Developments (Yesterday 9 AM – Today 7 AM IST): US markets rally & Brent crude eases",
+        "body": "Overnight global markets provided strong tailwinds. Wall Street indices closed higher (Nasdaq +0.45%, S&P 500 +0.24%) as sentiment stabilized. Crucially, Brent crude oil softened toward <b>$95.00 per barrel</b> (-2.71%) on global supply surplus reports, while the Indian Rupee strengthened to <b>₹93.95 per US dollar</b>."
+      },
+      {
+        "heading": "3. Sectors & Industries in Focus Today: Banking, FMCG, Oil-Sensitives, and Metal Laggards",
+        "body": "As trading opens today, <b>Banking and FMCG stocks</b> remain in focus following their strong momentum. Meanwhile, falling crude oil prices create a positive backdrop for <b>Airlines, Paint Makers, and Oil Marketing Companies</b>, while metal and realty stocks are watched for signs of stabilization."
+      }
+    ]
+  },
+  "economicCalendar": {
+    "upcoming": [
+      {
+        "date": "18 Nov",
+        "event": "WPI Wholesale Inflation YoY (Oct)",
+        "impact": "Medium"
+      },
+      {
+        "date": "28 Nov",
+        "event": "Q2 FY27 GDP Growth Rate YoY",
+        "impact": "High"
+      },
+      {
+        "date": "30 Nov",
+        "event": "Infrastructure Output YoY (Oct)",
+        "impact": "Medium"
+      }
+    ],
+    "recentReleases": [
+      {
+        "indicator": "India Retail Inflation CPI YoY (Oct)",
+        "actual": "6.09%",
+        "consensus": "5.85%"
+      },
+      {
+        "indicator": "India Food Inflation CFPI YoY (Oct)",
+        "actual": "8.94%",
+        "consensus": "8.10%"
+      },
+      {
+        "indicator": "Foreign Exchange Reserves",
+        "actual": "$694.5 Bn",
+        "consensus": "$692.0 Bn"
+      }
+    ]
+  },
+  "earningsCalendar": [
+    {
+      "date": "17 Nov",
+      "company": "Tata Motors Passenger Vehicles",
+      "period": "Q2 FY27"
+    },
+    {
+      "date": "18 Nov",
+      "company": "Bajaj Auto",
+      "period": "Q2 FY27"
+    },
+    {
+      "date": "19 Nov",
+      "company": "Hindalco Industries",
+      "period": "Q2 FY27"
+    }
+  ],
+  "technicalSnapshot": {
+    "nifty50": {
+      "level": 25291.1,
+      "immediateSupport": 25200,
+      "strongerSupport": 25000,
+      "immediateResistance": 25350,
+      "secondaryResistance": 25500,
+      "note": "Nifty successfully reclaimed 25,250 with strong momentum. Holding above 25,200 opens the path toward 25,350 and 25,500."
+    },
+    "sensex": {
+      "level": 82102.85,
+      "supportZone": "81,500 – 81,800",
+      "resistanceZone": "82,500 – 82,800",
+      "note": "Sensex closed comfortably above 82,100; clearing 82,500 will test record high territories."
+    },
+    "bankNifty": {
+      "support": "61,000 – 61,300",
+      "resistance": "62,000 – 62,300",
+      "rsi": "~64 (steady upward momentum)",
+      "note": "Bank Nifty led major sectoral gains, holding firmly above 61,300 support."
+    }
+  },
+  "sources": [
+    "nseindia.com",
+    "bseindia.com",
+    "business-standard.com",
+    "timesofindia.indiatimes.com",
+    "tradingeconomics.com"
+  ],
+  "disclaimer": "This dashboard is generated for information purposes only and does not constitute investment advice. Always verify figures against your broker terminal or official exchange websites before trading.",
+  "derivativesTracker": {
+    "rows": [
+      {
+        "date": "30 Oct",
+        "nifty": 23053.1,
+        "niftyChange": 116.35,
+        "callIv": 11.42,
+        "putIv": 13.85,
+        "pcr": 1.22,
+        "vix": 15.12,
+        "futCurOiAdd": 8450,
+        "futNextOiAdd": 1120,
+        "futCurPremium": 72.15,
+        "futNextPremium": 169.8,
+        "nseTurnover": 104218.42,
+        "advances": 1728,
+        "declines": 2045,
+        "fiiIndexFut": -238500
+      },
+      {
+        "date": "02 Nov",
+        "nifty": 23124.6,
+        "niftyChange": 71.5,
+        "callIv": 11.2,
+        "putIv": 13.55,
+        "pcr": 1.25,
+        "vix": 14.85,
+        "futCurOiAdd": 9620,
+        "futNextOiAdd": 850,
+        "futCurPremium": 76.4,
+        "futNextPremium": 174.15,
+        "nseTurnover": 101850.15,
+        "advances": 2315,
+        "declines": 1780,
+        "fiiIndexFut": -224600
+      },
+      {
+        "date": "03 Nov",
+        "nifty": 23195.4,
+        "niftyChange": 70.8,
+        "callIv": 11.05,
+        "putIv": 13.25,
+        "pcr": 1.28,
+        "vix": 14.52,
+        "futCurOiAdd": 7850,
+        "futNextOiAdd": 940,
+        "futCurPremium": 78.85,
+        "futNextPremium": 178.5,
+        "nseTurnover": 103420.8,
+        "advances": 2240,
+        "declines": 1820,
+        "fiiIndexFut": -216400
+      },
+      {
+        "date": "04 Nov",
+        "nifty": 23960.6,
+        "niftyChange": 149.75,
+        "callIv": 11.15,
+        "putIv": 13.4,
+        "pcr": 1.31,
+        "vix": 15.27,
+        "futCurOiAdd": 8920,
+        "futNextOiAdd": 1050,
+        "futCurPremium": 82.3,
+        "futNextPremium": 182.6,
+        "nseTurnover": 106840.5,
+        "advances": 2390,
+        "declines": 1715,
+        "fiiIndexFut": -208500
+      },
+      {
+        "date": "05 Nov",
+        "nifty": 24024.15,
+        "niftyChange": 63.55,
+        "callIv": 10.95,
+        "putIv": 13.1,
+        "pcr": 1.34,
+        "vix": 14.88,
+        "futCurOiAdd": 9450,
+        "futNextOiAdd": 1180,
+        "futCurPremium": 85.15,
+        "futNextPremium": 185.9,
+        "nseTurnover": 109240.2,
+        "advances": 2285,
+        "declines": 1810,
+        "fiiIndexFut": -198200
+      },
+      {
+        "date": "06 Nov",
+        "nifty": 25030.35,
+        "niftyChange": 493.75,
+        "callIv": 14.85,
+        "putIv": 17.2,
+        "pcr": 1.42,
+        "vix": 17.47,
+        "futCurOiAdd": 18450,
+        "futNextOiAdd": 2420,
+        "futCurPremium": -38.35,
+        "futNextPremium": 62.4,
+        "nseTurnover": 142850.6,
+        "advances": 1845,
+        "declines": 2230,
+        "fiiIndexFut": -142500
+      },
+      {
+        "date": "09 Nov",
+        "nifty": 25044.65,
+        "niftyChange": 14.3,
+        "callIv": 14.5,
+        "putIv": 16.85,
+        "pcr": 0.98,
+        "vix": 17.42,
+        "futCurOiAdd": 6250,
+        "futNextOiAdd": 850,
+        "futCurPremium": 12.35,
+        "futNextPremium": 88.5,
+        "nseTurnover": 118450.2,
+        "advances": 1420,
+        "declines": 1765,
+        "fiiIndexFut": -138500
+      },
+      {
+        "date": "11 Nov",
+        "nifty": 25255.05,
+        "niftyChange": 210.4,
+        "callIv": 14.65,
+        "putIv": 16.9,
+        "pcr": 1.12,
+        "vix": 17.55,
+        "futCurOiAdd": 9850,
+        "futNextOiAdd": 1420,
+        "futCurPremium": -66.05,
+        "futNextPremium": 42.1,
+        "nseTurnover": 138540.8,
+        "advances": 2495,
+        "declines": 1166,
+        "fiiIndexFut": -128400
+      },
+      {
+        "date": "12 Nov",
+        "nifty": 25299.35,
+        "niftyChange": 44.3,
+        "callIv": 12.46,
+        "putIv": 15.1,
+        "pcr": 1.0,
+        "vix": 16.6,
+        "futCurOiAdd": 12449,
+        "futNextOiAdd": 1850,
+        "futCurPremium": 14.65,
+        "futNextPremium": 98.4,
+        "nseTurnover": 126450.0,
+        "advances": 2541,
+        "declines": 1035,
+        "fiiIndexFut": -49719
+      },
+      {
+        "date": "13 Nov",
+        "nifty": 25144.3,
+        "niftyChange": -155.05,
+        "callIv": 12.6,
+        "putIv": 13.4,
+        "pcr": 0.83,
+        "vix": 15.5,
+        "futCurOiAdd": -269000,
+        "futNextOiAdd": null,
+        "futCurPremium": 30.7,
+        "futNextPremium": 190.7,
+        "nseTurnover": 118377.0,
+        "advances": 2163,
+        "declines": 1662,
+        "fiiIndexFut": -55920
+      },
+      {
+        "date": "16 Nov",
+        "nifty": 25291.1,
+        "niftyChange": 146.8,
+        "callIv": 12.5,
+        "putIv": 13.6,
+        "pcr": 1.05,
+        "vix": 15.7,
+        "futCurOiAdd": 11200,
+        "futNextOiAdd": null,
+        "futCurPremium": 35.5,
+        "futNextPremium": 195.0,
+        "nseTurnover": 121500.0,
+        "advances": 1399,
+        "declines": 2807,
+        "fiiIndexFut": -52100
+      }
+    ],
+    "note": "12-session rolling window updated through Monday, 16 November 2026 post-bhavcopy close. Market volatility (India VIX) stood at 15.70 as Nifty gained 146.80 points.",
+    "plainEnglishBreakdown": {
+      "asOfTradeDate": "2026-11-16",
+      "summaryHeadline": "Bulls return on Monday: Nifty bounces 146 points to 25,291 as foreign funds inject ₹5,737 Cr and market volatility ticks to 15.70.",
+      "spotVsFutures": {
+        "metrics": "Nifty Spot: 25,291.10 (+146.80 pts / +0.58%) | Nov Futures: 25,326.60 (+35.50 pts premium)",
+        "plainEnglish": "The Nifty rebounded strongly by 0.58%, and November futures traded at a healthy positive premium of ~35.5 points, showing strong confidence among derivatives traders."
+      },
+      "indiaVixMood": {
+        "metrics": "India VIX: 15.70 (+0.20 / +1.29%)",
+        "plainEnglish": "Market volatility edged up slightly to 15.70, reflecting ongoing hedging demand as benchmarks advanced."
+      },
+      "putCallRatioSafetyNet": {
+        "metrics": "Put-Call Ratio (PCR): 1.05",
+        "plainEnglish": "The Put-Call Ratio balanced at 1.05, indicating a healthy equilibrium between protective put options and bullish call options."
+      },
+      "callVsPutInsuranceCost": {
+        "metrics": "ATM Call IV: 12.50% | ATM Put IV: 13.60%",
+        "plainEnglish": "Option insurance costs remained stable, with put options costing slightly more than calls for routine downside protection."
+      },
+      "fiiInstitutionalStance": {
+        "metrics": "FII Net Index Futures: -52,100 contracts (continued short trimming)",
+        "plainEnglish": "Foreign institutional investors further reduced their net short index futures positions while aggressively buying cash equities (+₹5,737 Cr)."
+      }
+    }
+  },
+  "derivativesPlainEnglishBreakdown": {
+    "asOfTradeDate": "2026-11-16",
+    "summaryHeadline": "Bulls return on Monday: Nifty bounces 146 points to 25,291 as foreign funds inject ₹5,737 Cr and market volatility ticks to 15.70.",
+    "spotVsFutures": {
+      "metrics": "Nifty Spot: 25,291.10 (+146.80 pts / +0.58%) | Nov Futures: 25,326.60 (+35.50 pts premium)",
+      "plainEnglish": "The Nifty rebounded strongly by 0.58%, and November futures traded at a healthy positive premium of ~35.5 points, showing strong confidence among derivatives traders."
+    },
+    "indiaVixMood": {
+      "metrics": "India VIX: 15.70 (+0.20 / +1.29%)",
+      "plainEnglish": "Market volatility edged up slightly to 15.70, reflecting ongoing hedging demand as benchmarks advanced."
+    },
+    "putCallRatioSafetyNet": {
+      "metrics": "Put-Call Ratio (PCR): 1.05",
+      "plainEnglish": "The Put-Call Ratio balanced at 1.05, indicating a healthy equilibrium between protective put options and bullish call options."
+    },
+    "callVsPutInsuranceCost": {
+      "metrics": "ATM Call IV: 12.50% | ATM Put IV: 13.60%",
+      "plainEnglish": "Option insurance costs remained stable, with put options costing slightly more than calls for routine downside protection."
+    },
+    "fiiInstitutionalStance": {
+      "metrics": "FII Net Index Futures: -52,100 contracts (continued short trimming)",
+      "plainEnglish": "Foreign institutional investors further reduced their net short index futures positions while aggressively buying cash equities (+₹5,737 Cr)."
+    }
+  },
+  "tvLinks": {
+    "Nifty Auto": "https://www.tradingview.com/symbols/NSE-CNXAUTO/",
+    "Nifty Consumer Durables": "https://www.tradingview.com/symbols/NSE-NIFTY_CONSR_DURBL/",
+    "Nifty Oil & Gas": "https://www.tradingview.com/symbols/NSE-NIFTY_OIL_AND_GAS/",
+    "Nifty IT": "https://www.tradingview.com/symbols/NSE-CNXIT/",
+    "Nifty Pharma": "https://www.tradingview.com/symbols/NSE-CNXPHARMA/",
+    "Nifty Media": "https://www.tradingview.com/symbols/NSE-CNXMEDIA/",
+    "Nifty Bank": "https://www.tradingview.com/symbols/NSE-BANKNIFTY/",
+    "Nifty PSU Bank": "https://www.tradingview.com/symbols/NSE-CNXPSUBANK/",
+    "Nifty Financial Services": "https://www.tradingview.com/symbols/NSE-CNXFINANCE/",
+    "Nifty Private Bank": "https://www.tradingview.com/symbols/NSE-NIFTYPVTBANK/",
+    "Nifty Metal": "https://www.tradingview.com/symbols/NSE-CNXMETAL/",
+    "Nifty FMCG": "https://www.tradingview.com/symbols/NSE-CNXFMCG/",
+    "Nifty Realty": "https://www.tradingview.com/symbols/NSE-CNXREALTY/",
+    "Nifty Energy": "https://www.tradingview.com/symbols/NSE-CNXENERGY/",
+    "Nifty 50": "https://www.tradingview.com/symbols/NSE-NIFTY/",
+    "Sensex": "https://www.tradingview.com/symbols/BSE-SENSEX/",
+    "India VIX": "https://www.tradingview.com/symbols/NSE-INDIAVIX/",
+    "Bank Nifty": "https://www.tradingview.com/symbols/NSE-BANKNIFTY/",
+    "Brent Crude": "https://www.tradingview.com/symbols/TVC-UKOIL/",
+    "WTI Crude": "https://www.tradingview.com/symbols/TVC-USOIL/",
+    "Natural Gas": "https://www.tradingview.com/symbols/NYMEX-NG1!/",
+    "Gold": "https://www.tradingview.com/symbols/TVC-GOLD/",
+    "Silver": "https://www.tradingview.com/symbols/TVC-SILVER/",
+    "USD/INR": "https://www.tradingview.com/symbols/FX_IDC-USDINR/",
+    "DXY": "https://www.tradingview.com/symbols/TVC-DXY/",
+    "US 30-Yr Treasury Yield": "https://www.tradingview.com/symbols/TVC-TYX/"
+  },
+  "display": {
+    "dataNote": "Compiled Tuesday, 17 November 2026 at 7:00 AM IST. Indian exchange figures reflect confirmed post-bhavcopy closing data for Monday, 16 November 2026 (Nifty 25,291.10 +0.58%; Sensex 82,102.85 +0.63%; VIX 15.70).",
+    "tileNotes": {
+      "brentCrude": "Softened -2.71% to $95.00/bbl on supply surplus reports",
+      "wtiCrude": "Declined -1.12% to $88.00/bbl",
+      "naturalGas": "Moved lower to $3.18/MMBtu",
+      "gold": "Corrected -1.41% to $3,820.50/oz",
+      "silver": "Dropped -3.76% to $48.30/oz",
+      "usdInr": "Rupee strengthened to ₹93.95/USD",
+      "dollarIndex": "DXY eased -0.25% to 103.10",
+      "usTreasury30y": "30-Yr US yield eased -3 bps to 5.45%"
+    },
+    "currency": {
+      "spot": "₹93.95 / US$1",
+      "trend24h": "Strengthened on capital inflows and softer oil",
+      "trend1y": "Trading near stable ranges"
+    },
+    "technical": {
+      "sensexReclaimed": "82,100 reclaimed firmly",
+      "bankNiftyDeeperSupport": "61,000 – 61,300",
+      "bankNiftyDeeperResistance": "62,000 – 62,300"
+    }
+  },
+  "overnightDevelopments": {
+    "window": "Yesterday 9:00 AM IST to Today 7:00 AM IST",
+    "macroSummary": "Between yesterday 9:00 AM IST and today 7:00 AM IST, global markets turned positive as US equities advanced (Nasdaq +0.45%, S&P 500 +0.24%) and Brent crude oil softened toward $95.00/barrel. The US Dollar Index eased to 103.10, and the Indian Rupee strengthened to ₹93.95/USD.",
+    "sectorImpacts": [
+      {
+        "driver": "Softening Brent Crude ($95/bbl) & Stronger Rupee (₹93.95)",
+        "affectedSectors": [
+          "Aviation",
+          "Paints & Chemicals",
+          "Oil Marketing Companies (OMCs)",
+          "Oil & Gas (Upstream)"
+        ],
+        "impactType": "Mixed (Benefit for Fuel Users / Headwind for Explorers)",
+        "explanation": "Lower crude oil prices and a stronger Rupee reduce input cost pressures for airlines (IndiGo) and paint makers (Asian Paints), while slightly tempering revenue realizations for upstream explorers (ONGC)."
+      },
+      {
+        "driver": "US Tech & Equity Rally (Nasdaq +0.45%)",
+        "affectedSectors": [
+          "Nifty IT"
+        ],
+        "impactType": "Tailwind",
+        "explanation": "Positive momentum across US technology indices supports stable sentiment for Indian IT exporters (TCS, Infosys, HCLTech) at market open."
+      }
+    ]
+  },
+  "sectorsInFocusToday": [
+    {
+      "sector": "Nifty FMCG & Banking",
+      "bias": "Positive",
+      "catalyst": "Led Monday's rally (FMCG +1.87%, Bank +0.85%) driven by heavyweights like ITC and HDFC Bank",
+      "plainEnglishTakeaway": "Institutional buying in defensive and banking heavyweights continues to drive index momentum."
+    },
+    {
+      "sector": "Aviation, Paints & OMCs",
+      "bias": "Positive",
+      "catalyst": "Brent crude softened to $95.00/bbl and Rupee appreciated to ₹93.95/USD",
+      "plainEnglishTakeaway": "Lower input costs and favorable currency rates support margin expansion for fuel-dependent transport and manufacturing companies."
+    }
+  ]
+}
