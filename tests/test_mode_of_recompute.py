@@ -135,6 +135,44 @@ def test_stored_price_matches_postgres_numeric():
     assert round(44.025, 2) == 44.02   # why stored_price exists
 
 
+def test_rsi_sma14_full_rule_and_incremental_match():
+    """TMT-US-0024: rsi_sma14 = mean of the last 14 RSI (own row incl.); NULL until 14 exist or with a NULL inside;
+    INCREMENTAL (stored prior 13 RSI + walked rows) equals FULL."""
+    from core.rsi.rsi_calculator import compute_rsi14_all
+    from core.rsi.rsi_recompute import add_rsi_sma, sma_for_walked, walk_from_anchor, OUTPUT_COLUMNS
+
+    days = list(pd.bdate_range("2026-05-01", "2026-09-30").date)
+    closes = [100 + ((i * 37) % 11) - 5 + i * 0.1 for i in range(len(days))]
+    df = pd.DataFrame({"security_id": "S", "isin": "IS", "exchange": "NSE", "series": "EQ", "symbol": "S",
+                       "trade_date": days, "close": closes, "prev_close": [None] + closes[:-1]})
+    full = add_rsi_sma(compute_rsi14_all(df), 14)
+
+    # FULL rule: first RSI on row 14 (index 14), first SMA 13 rows later; value = plain mean of 14 RSI
+    first_rsi = full["rsi14"].first_valid_index()
+    first_sma = full["rsi_sma14"].first_valid_index()
+    assert first_sma == first_rsi + 13, (first_rsi, first_sma)
+    k = first_sma + 20
+    expected = sum(float(x) for x in full.loc[k - 13:k, "rsi14"]) / 14
+    assert abs(full.at[k, "rsi_sma14"] - expected) < 1e-9
+
+    # a NULL RSI inside the window -> NULL SMA for the 14 rows that include it
+    holed = full.copy(); holed.loc[k, "rsi14"] = None
+    holed = add_rsi_sma(holed.drop(columns=["rsi_sma14"]), 14)
+    assert holed.loc[k:k + 13, "rsi_sma14"].isna().all() and pd.notna(holed.at[k + 14, "rsi_sma14"])
+
+    # INCREMENTAL: anchor at row a, prior 13 stored RSI up to the anchor, walked rows after it
+    a = len(days) - 8
+    new = df.iloc[a + 1:].copy()
+    new["anchor_date"] = full.at[a, "trade_date"]
+    new["anchor_avg_gain"] = full.at[a, "avg_gain"]
+    new["anchor_avg_loss"] = full.at[a, "avg_loss"]
+    walked = pd.DataFrame(walk_from_anchor(new, None), columns=OUTPUT_COLUMNS)
+    prior = full.loc[a - 12:a, ["security_id", "trade_date", "rsi14"]]
+    inc = sma_for_walked(walked, prior, 14)
+    r = shadow.compare(inc, full, ["security_id", "trade_date"], ["rsi14", "rsi_sma14"], {"rsi14": 1e-9, "rsi_sma14": 1e-9})
+    assert r["rows_compared"] == len(days) - a - 1 and r["mismatches"] == 0, r
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
