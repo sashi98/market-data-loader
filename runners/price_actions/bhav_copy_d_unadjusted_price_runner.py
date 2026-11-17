@@ -34,7 +34,7 @@
 
 import sys
 import time
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -150,6 +150,11 @@ def _write_daily_audit(env_values, exchange, ceiling_date, start_date, target_da
         conn.close()
 
 
+def calendar_days(start_date, end_date):
+    """Every calendar day in [start_date, end_date], ascending (TMT-MDL-BUG-0012)."""
+    return [start_date + timedelta(days=i) for i in range((end_date - start_date).days + 1)]
+
+
 def run(env_values, tmt_app_base_url, token, download_dir, exchange, start_date, end_date, ceiling_date):
     """
     STEP 2 -- Daily Bhav Copy Runner, for ONE exchange. Blind upsert:
@@ -181,12 +186,13 @@ def run(env_values, tmt_app_base_url, token, download_dir, exchange, start_date,
         return {"start_date": start_date, "end_date": end_date, "any_new_data": False,
                 "outcome": "WARN", "daily": {"dates_ok": [], "outcome": "WARN"}}
 
-    pending = result["trading_date_list"]
-    if not pending:
-        return {"start_date": start_date, "end_date": end_date, "any_new_data": False,
-                "outcome": "CAUGHT_UP", "daily": {"dates_ok": [], "outcome": "CAUGHT_UP"}}
+    # TMT-MDL-BUG-0012 (14-Nov-2026): every CALENDAR day of the window is tried, not only the trading days --
+    # an exchange can trade on a weekend / holiday (Diwali Muhurat Sun 08-Nov-2026, Budget-day Saturday). The
+    # trading calendar now only explains a missing file: closed on a weekend/holiday = a true non-trading day.
+    trading_days = set(result["trading_date_list"])
+    pending = [d for d in calendar_days(start_date, end_date)]
 
-    print(f"  [{exchange}] {len(pending)} trading day(s) to process "
+    print(f"  [{exchange}] {len(pending)} day(s) to try, {len(trading_days)} of them trading day(s) "
           f"({pending[0].strftime('%d-%b-%Y')} to {pending[-1].strftime('%d-%b-%Y')}).")
 
     dates_ok = []
@@ -196,6 +202,19 @@ def run(env_values, tmt_app_base_url, token, download_dir, exchange, start_date,
         _write_daily_audit(env_values, exchange, ceiling_date, start_date, target_date,
                             len(pending), pending, result_info["outcome"], result_info["message"],
                             result_info["processing_time_ms"])
+
+        if target_date not in trading_days:
+            if result_info["outcome"] == "OK":
+                print(f"    [SPECIAL SESSION] {exchange} {fmt_date(target_date)} ({target_date.strftime('%a')}) is a "
+                      f"weekend/holiday in the calendar, but the exchange traded and published a bhav copy -- loaded.")
+            elif result_info["outcome"] == "SKIPPED" and result_info["message"].startswith("not available"):
+                print(f"    [CLOSED] {exchange} {fmt_date(target_date)} ({target_date.strftime('%a')}) -- true "
+                      f"non-trading day (weekend/holiday, no bhav copy published).")
+            elif result_info["outcome"] == "FAILED":
+                # e.g. BSE 403 on a Sunday: cannot tell, but it must not hold back the trading days after it
+                print(f"    [WARN] {exchange} {fmt_date(target_date)} ({target_date.strftime('%a')}) is a "
+                      f"weekend/holiday and could not be checked ({result_info['message']}) -- treated as closed.")
+                result_info["outcome"] = "SKIPPED"
 
         if result_info["outcome"] == "FAILED":
             daily_outcome = "FAILED"
