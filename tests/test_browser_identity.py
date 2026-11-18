@@ -37,6 +37,62 @@ def test_b3_firewall_403_is_recognised():
     assert is_firewall_block(None) is False
 
 
+# 18-Nov-2026: from the prod container BSE answered 403 to plain requests with any User-Agent (TLS fingerprint);
+# curl_cffi impersonating Chrome got the CSV. browser_get() uses curl_cffi when installed, else requests.
+import requests  # noqa: E402
+from core.browser_identity import browser_get, IMPERSONATE  # noqa: E402
+
+
+class FakeCurl:
+    def __init__(self, fail=None):
+        self.calls, self.fail = [], fail
+
+    def get(self, url, **kw):
+        self.calls.append((url, kw))
+        if self.fail:
+            raise self.fail
+        return Resp(200, "Security Code,Security Name")
+
+
+def test_b4_curl_cffi_impersonates_chrome_and_leaves_the_user_agent_to_it():
+    curl = FakeCurl()
+    r = browser_get("https://api.bseindia.com/x", headers={"User-Agent": "old", "Referer": "https://www.bseindia.com/"},
+                    params={"a": 1}, timeout=(10, 60), _curl=curl)
+    url, kw = curl.calls[0]
+    assert r.status_code == 200 and kw["impersonate"] == IMPERSONATE == "chrome"
+    assert "User-Agent" not in kw["headers"] and kw["headers"]["Referer"] == "https://www.bseindia.com/"
+    assert kw["params"] == {"a": 1} and kw["timeout"] == 70
+
+
+def test_b5_curl_cffi_errors_surface_as_requests_errors():
+    try:
+        browser_get("https://api.bseindia.com/x", _curl=FakeCurl(fail=RuntimeError("curl: (28) timeout")))
+        assert False, "should raise"
+    except requests.exceptions.RequestException as e:
+        assert "timeout" in str(e)
+
+
+def test_b6_falls_back_to_requests_with_the_shared_user_agent():
+    seen = {}
+    original = requests.get
+
+    def fake_get(url, **kw):
+        seen.update(kw)
+        return Resp(200, "ok")
+    requests.get = fake_get
+    try:
+        import core.browser_identity as bi
+        real = bi._curl_cffi
+        bi._curl_cffi = lambda: None
+        try:
+            browser_get("https://api.bseindia.com/x", headers={"Referer": "r"})
+        finally:
+            bi._curl_cffi = real
+    finally:
+        requests.get = original
+    assert seen["headers"]["User-Agent"] == BROWSER_USER_AGENT and seen["headers"]["Referer"] == "r"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

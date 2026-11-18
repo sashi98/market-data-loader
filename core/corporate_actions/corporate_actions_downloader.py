@@ -26,7 +26,7 @@ import io
 
 import requests
 
-from core.browser_identity import BROWSER_USER_AGENT, FIREWALL_HINT, is_firewall_block
+from core.browser_identity import BROWSER_USER_AGENT, FIREWALL_HINT, browser_get, is_firewall_block
 
 from core.date_format import fmt_date
 
@@ -157,7 +157,8 @@ def download_bse_corporate_actions(from_date, to_date):
     }
 
     try:
-        response = requests.get(
+        # TMT-MDL-BUG-0008: BSE's firewall also checks the TLS handshake -- browser_get() impersonates Chrome.
+        response = browser_get(
             BSE_CORPORATE_ACTIONS_URL,
             headers=headers,
             params=params,
@@ -324,7 +325,8 @@ def download_bse_corporate_actions_csv(from_date, to_date):
     }
 
     try:
-        response = requests.get(
+        # TMT-MDL-BUG-0008: BSE's firewall also checks the TLS handshake -- browser_get() impersonates Chrome.
+        response = browser_get(
             BSE_CORPORATE_ACTIONS_CSV_URL,
             headers=headers,
             params=params,
