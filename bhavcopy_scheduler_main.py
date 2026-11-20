@@ -1073,12 +1073,12 @@ def check_and_process(env_values):
             # result in memory on top of the FULL one; two indicators at a time then ran the dev laptop out of
             # memory (ma50d / ma200d "out of memory", rsi14d / rsi14w "connection already closed"). One at a
             # time in SHADOW; two at a time otherwise, as before.
+            # TMT-MDL-BUG-0015 (20-Nov-2026): two at a time in FULL ran PROD out of memory too, three nights in a row
+            # (18 / 19 / 20-Nov: rsi14d + rsi14w together -> Docker's VM ran out of memory, lost its route to Postgres
+            # on the host, backend and sign-in hung, rsi14w "connection already closed"). One at a time in every mode.
             gc.collect()   # release what steps 4-6 left behind before the heaviest step
-            shadow_on = any(recompute_mode.mode_of_recompute(env_values, step) == recompute_mode.SHADOW
-                            for step in recompute_mode.ENV_KEYS)
-            indicator_workers = 1 if shadow_on else 2
-            logger.info(f"  Running {len(activated_indicators)} indicator(s), {indicator_workers} at a time"
-                        + (" (a step is in SHADOW)." if shadow_on else "."))
+            indicator_workers = 1
+            logger.info(f"  Running {len(activated_indicators)} indicator(s), one at a time.")
             with concurrent.futures.ThreadPoolExecutor(max_workers=indicator_workers) as executor:
                 futures = [
                     executor.submit(_run_indicator, env_values, indicator_id, DEFAULT_START_DATE, latest_trade_date)
