@@ -129,6 +129,7 @@ from core.stock_universe.persistence import (
     fetch_last_processed_cursor, fetch_isin_exchange_map,
     update_stock_fundamentals, normalize_field_value, record_enrichment_run,
     record_enrichment_audit_rows, set_enrichment_running, is_scheduler_running, StockUniversePersistenceError,
+    fetch_resume_point, fetch_isins_enriched_since,
     clear_enrichment_lock_at_startup,
 )
 from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_DELAY_SECONDS
@@ -486,6 +487,7 @@ def _worker(env_values, work_queue, results_lock, results, taxonomy_maps):
                                       f"{len(written_fields)} field(s) written{dropped_note}: {written_fields}")
                                 with results_lock:
                                     results["enriched"] += 1
+                                    results["ok"].append(isin_number)
                     except StockUniversePersistenceError as e:
                         conn.rollback()
                         nse_row_shareable = False
@@ -554,6 +556,7 @@ def _worker(env_values, work_queue, results_lock, results, taxonomy_maps):
                                           f"{len(written_fields)} field(s) written{dropped_note}: {written_fields}")
                                     with results_lock:
                                         results["enriched"] += 1
+                                        results["ok"].append(isin_number)
 
                                     # TMT-US-0010: same company, same official taxonomy -- an NSE row whose
                                     # sector came from Yahoo / TradingView (or from nowhere) takes the
@@ -585,6 +588,52 @@ def _worker(env_values, work_queue, results_lock, results, taxonomy_maps):
         conn.close()
 
 
+def _run_pass(env_values, isins, results, results_lock, taxonomy_maps):
+    """One pass of the worker threads over (isin_number, entry) items."""
+    work_queue = Queue()
+    for isin_number, entry in isins:
+        work_queue.put((isin_number, entry["nse_symbol"], entry["nse_exchange"], entry["bse_symbol"], entry["bse_exchange"], entry["bse_security_code"]))
+    threads = [
+        threading.Thread(target=_worker, args=(env_values, work_queue, results_lock, results, taxonomy_maps),
+                         name=f"enrich-worker-{i}")
+        for i in range(WORKER_THREAD_COUNT)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+RETRY_OUTCOMES = ("NO_DATA", "FAILED")
+
+
+def _catch_up_pass(env_values, isins, results, results_lock, taxonomy_maps):
+    """
+    TMT-MDL-US-0006 part 3: every ISIN with a side that ended [NO DATA] / [FAILED] in the main pass is enriched
+    once more before the batch is recorded, so a passing blip never leaves a stock behind. The retried ISINs'
+    first-pass outcomes are replaced by the catch-up outcomes (counters and audit rows), so nothing is counted
+    twice. What still fails after this is genuinely empty and stays in stock_universe_enrichment_audit.
+    """
+    retry = {a["isin_number"] for a in results["audit"] if a["outcome"] in RETRY_OUTCOMES}
+    if not retry:
+        return
+    items = [item for item in isins if item[0] in retry]
+    logger.info(f"  [CATCH-UP] {len(items):,} ISIN(s) had a side with no data / a failure -- enriching them once more ...")
+    again = {"enriched": 0, "failed": 0, "excluded": 0, "audit": [], "ok": []}
+    _run_pass(env_values, items, again, threading.Lock(), taxonomy_maps)
+    with results_lock:
+        first_ok = sum(1 for i in results["ok"] if i in retry)
+        first_failed = sum(1 for a in results["audit"] if a["isin_number"] in retry and a["outcome"] in RETRY_OUTCOMES)
+        first_excluded = sum(1 for a in results["audit"] if a["isin_number"] in retry and a["outcome"] == "EXCLUDED")
+        results["enriched"] += again["enriched"] - first_ok
+        results["failed"] += again["failed"] - first_failed
+        results["excluded"] += again["excluded"] - first_excluded
+        results["ok"] = [i for i in results["ok"] if i not in retry] + again["ok"]
+        results["audit"] = [a for a in results["audit"] if a["isin_number"] not in retry] + again["audit"]
+    still = len({a["isin_number"] for a in again["audit"] if a["outcome"] in RETRY_OUTCOMES})
+    logger.info(f"  [CATCH-UP] done -- {len(items) - still:,} recovered, {still:,} still without data (kept in the audit).")
+
+
 def run_enrichment_batch(env_values, max_metadata_id, limit=None):
     """
     Runs one full enrichment pass over every ISIN currently in
@@ -610,9 +659,13 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
     """
     started_at = datetime.now(timezone.utc)
 
+    resume_from = None
     if limit is None:
         try:
             conn = get_connection(env_values)
+            # TMT-MDL-US-0006 part 2: read where an interrupted attempt at this batch began BEFORE the flag
+            # below overwrites it -- the body then skips ISINs that attempt already finished.
+            resume_from = fetch_resume_point(conn, max_metadata_id)
             set_enrichment_running(conn, True)
             conn.close()
             logger.info("  Entering maintenance mode -- stock universe enrichment running.")
@@ -621,7 +674,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
             return
 
     try:
-        _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at)
+        _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at, resume_from)
     finally:
         if limit is None:
             try:
@@ -634,7 +687,7 @@ def run_enrichment_batch(env_values, max_metadata_id, limit=None):
                       f"the app may be stuck showing the maintenance banner to every user until this is fixed. {e}")
 
 
-def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
+def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at, resume_from=None):
     """
     The actual batch logic, split out from run_enrichment_batch() purely
     so that function's try/finally around the maintenance-status flag
@@ -657,6 +710,21 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
         logger.info(f"  --limit {limit} given -- truncating {len(isins)} ISINs down to the first {limit} for this test run.")
         isins = isins[:limit]
 
+    # TMT-MDL-US-0006 part 2: an earlier attempt at this batch was cut off (power cut, laptop off, restart) --
+    # skip the ISINs it already finished and carry on with the rest instead of starting from the first ISIN.
+    if resume_from is not None:
+        try:
+            conn = get_connection(env_values)
+            done = fetch_isins_enriched_since(conn, resume_from)
+            conn.close()
+        except (DbConnectionError, StockUniversePersistenceError) as e:
+            logger.warning(f"  [RESUME] could not read finished ISINs ({e}) -- enriching every ISIN again (nothing lost, just slower).")
+            done = set()
+        before = len(isins)
+        isins = [item for item in isins if item[0] not in done]
+        logger.info(f"  [RESUMED] an earlier attempt at this batch started {resume_from} and stopped mid-way: "
+                    f"{before - len(isins):,} of {before:,} ISINs were already enriched -- continuing with the remaining {len(isins):,}.")
+
     total = len(isins)
     # Worst case 2 requests on the BSE side (official API, yfinance --
     # no TradingView, see this file's own header comment for why) and
@@ -666,11 +734,7 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
     logger.info(f"  Enriching {total} ISINs using {WORKER_THREAD_COUNT} worker threads "
           f"({RATE_LIMIT_DELAY_SECONDS}s delay per request per thread, ~{estimated_minutes} min worst-case estimate)...")
 
-    work_queue = Queue()
-    for isin_number, entry in isins:
-        work_queue.put((isin_number, entry["nse_symbol"], entry["nse_exchange"], entry["bse_symbol"], entry["bse_exchange"], entry["bse_security_code"]))
-
-    results = {"enriched": 0, "failed": 0, "excluded": 0, "audit": []}
+    results = {"enriched": 0, "failed": 0, "excluded": 0, "audit": [], "ok": []}
     results_lock = threading.Lock()
 
     # TMT-US-0010 step 0: the sector / industry maps, loaded once from the
@@ -685,16 +749,9 @@ def _run_enrichment_batch_body(env_values, max_metadata_id, limit, started_at):
                 f"{len(taxonomy_maps.industries)} industry(ies); names cleaned: {taxonomy_maps.cleaned_sectors} sector(s), "
                 f"{taxonomy_maps.cleaned_industries} industry(ies); stocks set to Others: {taxonomy_maps.others_filled}.")
 
-    threads = [
-        threading.Thread(target=_worker, args=(env_values, work_queue, results_lock, results, taxonomy_maps),
-                         name=f"enrich-worker-{i}")
-        for i in range(WORKER_THREAD_COUNT)
-    ]
     try:
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        _run_pass(env_values, isins, results, results_lock, taxonomy_maps)
+        _catch_up_pass(env_values, isins, results, results_lock, taxonomy_maps)
     finally:
         taxonomy_maps.close()
     logger.info(f"  Sector / industry maps: {taxonomy_maps.new_sectors} new sector(s), "
