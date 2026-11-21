@@ -843,3 +843,48 @@ def clear_enrichment_lock_at_startup(conn):
         return None
     set_enrichment_running(conn, False)
     return row[1] or datetime.now()
+
+
+# ── TMT-MDL-US-0006 part 2 (21-Nov-2026): resume an enrichment batch after a restart ─────────────────────
+def fetch_resume_point(conn, max_metadata_id):
+    """
+    When an earlier attempt at THIS batch was cut off (power cut, laptop shut down, container restart), returns
+    the time that attempt started (maintenance_status.enrichment_started_at), else None. "This batch" = the
+    attempt started after the batch's last upload (stock_universe_metadata.created_at of max_metadata_id), so a
+    start time left over from an older, finished batch is never mistaken for one. Both times are DB clock.
+    Must be read BEFORE set_enrichment_running(True), which overwrites enrichment_started_at.
+    """
+    query = """
+        SELECT ms.enrichment_started_at
+          FROM maintenance_status ms
+         WHERE ms.id = 1
+           AND ms.enrichment_started_at IS NOT NULL
+           AND ms.enrichment_started_at > (SELECT md.created_at FROM stock_universe_metadata md WHERE md.id = %s)
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (max_metadata_id,))
+            row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to read the enrichment resume point: {e}")
+
+
+def fetch_isins_enriched_since(conn, since):
+    """
+    ISINs whose EVERY stock_universe row (NSE and / or BSE side) was written at or after `since` -- i.e. fully
+    done by the interrupted attempt. update_stock_fundamentals() stamps updated_at on every write; a side that
+    ended [NO DATA] / [FAILED] is not stamped, so its ISIN is enriched again (nothing is lost).
+    """
+    query = """
+        SELECT isin_number
+          FROM stock_universe
+         GROUP BY isin_number
+        HAVING MIN(updated_at) >= %s
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, (since,))
+            return {r[0] for r in cur.fetchall()}
+    except Exception as e:
+        raise StockUniversePersistenceError(f"Failed to read ISINs enriched since {since}: {e}")
