@@ -133,6 +133,7 @@ from core.stock_universe.persistence import (
     clear_enrichment_lock_at_startup,
 )
 from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_DELAY_SECONDS
+from core.financials.quarterly_results import refresh_due as refresh_due_financial_results
 from core.stock_universe.tradingview_client import fetch_fundamentals_tradingview, TRADINGVIEW_COVERABLE_FIELDS
 from core.stock_universe.nse_client import fetch_fundamentals_nse, NseExcluded
 from core.stock_universe.bse_client import fetch_fundamentals_bse, BseExcluded
@@ -911,6 +912,15 @@ def poll_once(env_values, limit=None, last_idle_state=None):
     logger.info("=" * 60)
     logger.info(f"  New complete batch detected (metadata id {max_metadata_id} > cursor {cursor}) -- starting enrichment.")
     run_enrichment_batch(env_values, max_metadata_id, limit=limit)
+
+    # TMT-US-0030-004 -- after the weekly enrichment (and AFTER its maintenance banner is cleared, so the app stays
+    # usable): bring reported quarterly results up to date for every company whose latest quarter is due. Only due
+    # companies are fetched (results change once a quarter); a failure is logged and simply stays due for next week
+    # or for Copy prompt's own refresh -- it never fails the enrichment. --limit test runs cap it the same way.
+    try:
+        refresh_due_financial_results(lambda: get_connection(env_values), limit=limit)
+    except Exception as e:
+        logger.error(f"  [FAILED] Financial results refresh did not complete (picked up next run): {e}")
 
     logger.info("  Poll cycle complete.")
     logger.info("=" * 60)
