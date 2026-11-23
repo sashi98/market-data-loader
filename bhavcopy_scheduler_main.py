@@ -688,17 +688,20 @@ def _run_indicator(env_values, indicator_id, start_date, end_date):
     (which also sets DEACTIVE) before returning False -- this function
     must not double up on that.
     """
+    # TMT-MDL-BUG-0017: returns True only when the indicator completed cleanly (or has no runner); False makes
+    # check_and_process() leave the cycle open so it is retried in CHECK_INTERVAL_SECONDS.
     runner = RUNNERS.get(indicator_id)
     if runner is None:
         logger.info(f"  [{indicator_id}] No runner registered -- skipping this cycle.")
-        return
+        return True
 
     try:
         conn = get_connection(env_values)
     except DbConnectionError as e:
         logger.error(f"  [{indicator_id}] Failed to open a connection: {e}")
-        return
+        return False
 
+    completed_cleanly = False
     try:
         step = MODE_OF_RECOMPUTE_STEP_BY_INDICATOR.get(indicator_id)
         if step is not None:
@@ -711,6 +714,7 @@ def _run_indicator(env_values, indicator_id, start_date, end_date):
             logger.info(f"  [{indicator_id}] Complete -- deactivated in indicators_registry.")
     except IndicatorsPersistenceError as e:
         logger.error(f"  [{indicator_id}] Bookkeeping error: {e}")
+        completed_cleanly = False
     except Exception as e:
         # Catching broadly here keeps one indicator's unexpected failure
         # scoped to just this indicator_id, instead of taking the whole
@@ -718,9 +722,14 @@ def _run_indicator(env_values, indicator_id, start_date, end_date):
         # every cycle after) down with it.
         logger.error(f"  [{indicator_id}] UNEXPECTED FAILURE (not handled by the runner's own error "
               f"handling) -- skipping this indicator for the rest of this cycle: {e}")
+        completed_cleanly = False
     finally:
-        conn.close()
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 -- a connection the database already dropped
+            pass
         gc.collect()   # hand this indicator's DataFrames back before the next one starts
+    return bool(completed_cleanly)
 
 
 def print_summary(cycle_summary, activated_indicators, elapsed_seconds):
@@ -964,6 +973,7 @@ def check_and_process(env_values):
 
     # CRITICAL: this finally block is what guarantees maintenance mode
     # never stays stuck on.
+    failed_indicators = []   # TMT-MDL-BUG-0017
     try:
         download_dir = env_values["DATA_MARKET_DATA_LOADER_BHAV_COPY_DOWNLOAD_DIR"]
 
@@ -1084,13 +1094,14 @@ def check_and_process(env_values):
                     executor.submit(_run_indicator, env_values, indicator_id, DEFAULT_START_DATE, latest_trade_date)
                     for indicator_id in activated_indicators
                 ]
-                for future in concurrent.futures.as_completed(futures):
+                for indicator_id, future in zip(activated_indicators, futures):
                     # _run_indicator() already catches and logs every
                     # exception itself so one indicator's runner can't
                     # take any other down -- this just surfaces anything
                     # that somehow escaped that handling instead of
                     # swallowing it silently.
-                    future.result()
+                    if not future.result():
+                        failed_indicators.append(indicator_id)
 
         cycle_summary = {
             "ceiling_date": ceiling_date,
@@ -1098,6 +1109,10 @@ def check_and_process(env_values):
             "gap": gap,
         }
         print_summary(cycle_summary, activated_indicators, time.time() - cycle_start)
+        if failed_indicators:
+            logger.error(f"  [FAILED] Indicator(s) did not complete: {', '.join(failed_indicators)} -- the cycle is "
+                         f"left open and retried in {CHECK_INTERVAL_SECONDS // 60} min (only what is still behind "
+                         f"runs again).")
     finally:
         if _set_maintenance(env_values, False):
             _OWN_MAINTENANCE_FLAG_LEFT_ON = False
@@ -1105,7 +1120,8 @@ def check_and_process(env_values):
         else:
             logger.error("  [FAILED] Could not clear maintenance status -- the next cycle attempt will clear it "
                          "first (before logging in); until then every user sees the maintenance banner.")
-    return True
+    # TMT-MDL-BUG-0017: an indicator that failed leaves the cycle open (retried within the same window)
+    return not failed_indicators
 
 
 def _stock_universe_ready(env_values):
@@ -1363,8 +1379,8 @@ def run():
                     # docstring for why a stale value here would be
                     # actively misleading during an ongoing outage.
                     _update_scheduler_next_run_at(env_values, next_retry_at)
-                    logger.error(f"  Cycle {fmt_date(cycle_id)} not complete (could not start, or the latest bhav copy "
-                          f"is not published yet) -- retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at "
+                    logger.error(f"  Cycle {fmt_date(cycle_id)} not complete (could not start, the latest bhav copy "
+                          f"is not published yet, or an indicator failed) -- retrying in {CHECK_INTERVAL_SECONDS // 60} min, i.e. at "
                           f"{fmt_datetime(next_retry_at)}, still within this same cycle's window.")
                     time.sleep(CHECK_INTERVAL_SECONDS)
         except KeyboardInterrupt:

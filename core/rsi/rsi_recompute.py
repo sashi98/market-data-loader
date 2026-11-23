@@ -34,6 +34,8 @@
 
 import pandas as pd
 
+import gc
+
 from core.date_format import fmt_date
 from core.recompute import mode as recompute_mode
 from core.recompute import queue as recompute_queue
@@ -48,6 +50,11 @@ A_FALLBACK = "A_FALLBACK"
 # Below this the stored (10-decimal) averages may no longer carry FULL's ratio -> whole-history recompute.
 TINY_AVERAGE = 1e-6
 FULL_HISTORY_BATCH = 300
+# TMT-MDL-BUG-0017: FULL recompute works through each exchange in batches of this many stocks (fetch -> compute ->
+# write -> free) instead of loading the whole exchange at once (~3M rows for BSE daily), which ran the 8 GB prod PC
+# out of memory on 23-Nov-2026 and took PostgreSQL's connections down with it. RSI and RSI-SMA are per stock, so the
+# result is identical.
+FULL_RECOMPUTE_BATCH = 500
 
 OUTPUT_COLUMNS = ["security_id", "isin", "exchange", "series", "symbol", "trade_date",
                   "gain", "loss", "avg_gain", "avg_loss", "rsi14"]
@@ -140,6 +147,37 @@ def _fetch_exchange(conn, cfg, exchange):
          WHERE exchange = %(exchange)s
          ORDER BY security_id, trade_date ASC
         """, conn, params={"exchange": exchange})
+
+
+def _exchange_security_ids(conn, cfg, exchange):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT DISTINCT security_id FROM {cfg['source_table']} WHERE exchange = %s ORDER BY 1", (exchange,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def _full_in_batches(conn, cfg, indicator_id, exchange, calendar_index, batch_size=FULL_RECOMPUTE_BATCH):
+    """
+    FULL recompute of one exchange, FULL_RECOMPUTE_BATCH stocks at a time: each batch's whole history is fetched,
+    RSI (+ RSI-SMA) computed and written before the next batch is read, so memory stays at one batch.
+    Returns the rows written.
+    """
+    sids = _exchange_security_ids(conn, cfg, exchange)
+    batches = (len(sids) + batch_size - 1) // batch_size
+    written = 0
+    for b, i in enumerate(range(0, len(sids), batch_size), start=1):
+        df = _fetch_full_history(conn, cfg, exchange, sids[i:i + batch_size])
+        if df.empty:
+            continue
+        full = compute_rsi14_all(df, calendar_index=calendar_index)
+        if cfg.get("sma_window"):
+            full = add_rsi_sma(full, cfg["sma_window"])
+        written += upsert_rsi_workbook(conn, cfg["target_table"], full)
+        if b == batches or b % 5 == 0:
+            print(f"  [{indicator_id}/{exchange}] FULL batch {b}/{batches} -- {min(i + batch_size, len(sids)):,} of "
+                  f"{len(sids):,} stocks, {written:,} rows written so far.")
+        del df, full
+        gc.collect()
+    return written
 
 
 def add_rsi_sma(rsi_df, window):
@@ -316,13 +354,7 @@ def run(conn, cfg, indicator_id, start_date, end_date, mode_of_recompute):
         if mode in (recompute_mode.FULL, recompute_mode.SHADOW) or whole_exchange:
             if mode == recompute_mode.INCREMENTAL:
                 print(f"  [{indicator_id}/{exchange}] INCREMENTAL fell back to FULL ({reason}).")
-            df = _fetch_exchange(conn, cfg, exchange)
-            if df.empty:
-                continue
-            full = compute_rsi14_all(df, calendar_index=calendar_index)
-            if cfg.get("sma_window"):
-                full = add_rsi_sma(full, cfg["sma_window"])
-            total_written += upsert_rsi_workbook(conn, cfg["target_table"], full)
+            total_written += _full_in_batches(conn, cfg, indicator_id, exchange, calendar_index)
         else:
             result, list_a_count, fallback_count = compute_incremental(conn, cfg, exchange, since, list_b, calendar_index)
             written = upsert_rsi_workbook(conn, cfg["target_table"], result) if not result.empty else 0
