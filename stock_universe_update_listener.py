@@ -136,7 +136,7 @@ from core.stock_universe.yfinance_client import fetch_fundamentals, RATE_LIMIT_D
 from core.financials.quarterly_results import refresh_due as refresh_due_financial_results
 from core.stock_universe.tradingview_client import fetch_fundamentals_tradingview, TRADINGVIEW_COVERABLE_FIELDS
 from core.stock_universe.nse_client import fetch_fundamentals_nse, NseExcluded
-from core.stock_universe.bse_client import fetch_fundamentals_bse, BseExcluded
+from core.stock_universe.bse_client import fetch_fundamentals_bse, expand_bse_index, BseExcluded
 from core.stock_universe.taxonomy import (
     TaxonomyMaps, taxonomy_fields, OFFICIAL_SOURCES,
     SOURCE_NSE, SOURCE_BSE, SOURCE_TRADINGVIEW, SOURCE_YFINANCE,
@@ -357,7 +357,8 @@ def _resolve_bse_side(bse_session, isin_number, bse_symbol, bse_exchange, bse_se
             if bse_fields.get("sector"):
                 taxonomy_source = SOURCE_BSE
         if bse_index_value:
-            fields.setdefault("index_list", [bse_index_value])
+            # TMT-MDL-BUG-0006: cumulative (a SENSEX stock is also in BSE 100 / 200 / 500 / 1000)
+            fields.setdefault("index_list", expand_bse_index(bse_index_value))
     except BseExcluded as e:
         logger.info(f"  [EXCLUDED] {isin_number} BSE-side (BSE={bse_security_code}) -- {e}")
         with results_lock:
