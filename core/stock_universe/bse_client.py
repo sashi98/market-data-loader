@@ -115,6 +115,27 @@ class BseExcluded(Exception):
     pass
 
 
+# TMT-MDL-BUG-0006 (25-Nov-2026): BSE's single "Index" value is the SMALLEST broad index a stock is in, but the broad
+# indices nest -- every SENSEX stock is also in BSE 100, 200, 500 and 1000 (BSE's own counts confirmed it: 30 + 70 +
+# 100 + 301 + 500 = the 1,001 stocks of BSE 1000, each tier stored minus the tiers above it). Expanded here so
+# index_list is cumulative, like NSE's (NIFTY 50 stocks are also in NIFTY 100). Any other index name is kept as is.
+BSE_BROAD_TIERS = ("BSE SENSEX", "BSE 100", "BSE 200", "BSE 500", "BSE 1000")
+
+
+def expand_bse_index(index_value):
+    """BSE's one Index string -> the index_list: that index plus every larger broad index containing it."""
+    if index_value is None:
+        return []
+    name = " ".join(str(index_value).split())
+    if not name or name == "-":
+        return []
+    upper = name.upper()
+    for i, tier in enumerate(BSE_BROAD_TIERS):
+        if upper == tier:
+            return list(BSE_BROAD_TIERS[i:])
+    return [name]
+
+
 def fetch_fundamentals_bse(bse_session, security_code):
     """
     Calls equityMetaInfo(security_code) for one BSE scrip, using an
