@@ -32,6 +32,13 @@ CRORE = 10_000_000
 DUE_AFTER_DAYS = 14
 # Same per-request delay as the enrichment's yfinance tier (core/stock_universe/yfinance_client.py).
 RATE_LIMIT_DELAY_SECONDS = 1.5
+# TMT-US-0030-011: a company Yahoo has no quarterly results for (mostly BSE micro-caps) is not asked again for this
+# many days, unless a new quarter becomes due in the meantime. Network / rate-limit failures still retry next run.
+NO_DATA_BACKOFF_DAYS = 30
+STATUS_OK, STATUS_FAILED, STATUS_NO_DATA = "OK", "FAILED", "NO_DATA"
+# Failure messages that mean "Yahoo has nothing for this company" (also matches rows saved as FAILED before
+# TMT-US-0030-011 introduced NO_DATA).
+_NO_DATA_MARKERS = ("no quarterly statements returned", "no yfinance ticker")
 
 # yfinance row names, first one present wins.
 _INCOME_FIELDS = {
@@ -77,6 +84,36 @@ def last_quarter_end(on_or_before):
 def due_quarter_end(today, due_after_days=DUE_AFTER_DAYS):
     """The latest quarter end whose results may be out by today: the last quarter end at least due_after_days ago."""
     return last_quarter_end(today - timedelta(days=due_after_days))
+
+
+def is_company_equity(isin):
+    """
+    TMT-US-0030-011: True for an Indian company's equity share ISIN (INE + issuer + security type 01), the only
+    listings that file quarterly results. False for mutual funds / ETFs (INF...), partly paid and DVR lines (IN9...),
+    rights entitlements (e.g. CRESCE-RE1 INE754C20028, type 20) and other non-equity types.
+    """
+    s = (isin or "").strip().upper()
+    return len(s) == 12 and s.startswith("INE") and s[7:9] == "01"
+
+
+def is_no_data(status, message):
+    """True when the last attempt found nothing at Yahoo (NO_DATA, or an older FAILED row with that message)."""
+    if status == STATUS_NO_DATA:
+        return True
+    return status == STATUS_FAILED and any(m in (message or "").lower() for m in _NO_DATA_MARKERS)
+
+
+def backed_off(status, message, last_attempt, today, backoff_days=NO_DATA_BACKOFF_DAYS):
+    """
+    TMT-US-0030-011: skip a company whose last attempt found no data at Yahoo, for backoff_days -- unless a newer
+    quarter has become due since that attempt (a company that starts filing is picked up with its next quarter).
+    """
+    if last_attempt is None or not is_no_data(status, message):
+        return False
+    attempted = last_attempt.date() if isinstance(last_attempt, datetime) else last_attempt
+    if (today - attempted).days >= backoff_days:
+        return False
+    return due_quarter_end(attempted) == due_quarter_end(today)
 
 
 def is_due(latest_stored_period_end, today, due_after_days=DUE_AFTER_DAYS):
@@ -256,8 +293,13 @@ def refresh_one(conn, isin, symbol, exchange, security_code, trigger):
         except Exception as e:
             conn.rollback()
             result = {"refreshed": False, "newQuarters": 0, "ticker": ticker, "error": str(e)}
+    if result["refreshed"]:
+        status = STATUS_OK
+    else:
+        status = STATUS_NO_DATA if is_no_data(STATUS_FAILED, result["error"]) else STATUS_FAILED
+    result["status"] = status
     try:
-        record_attempt(conn, isin, "OK" if result["refreshed"] else "FAILED", result["error"], trigger)
+        record_attempt(conn, isin, status, result["error"], trigger)
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -272,6 +314,14 @@ def select_due(conn, today=None):
     One listing per company (NSE-family preferred) whose latest stored quarter is older than the due quarter end
     (or that has none), skipping companies already attempted today. [(isin, symbol, exchange, security_code)].
     """
+    return select_due_with_counts(conn, today)[0]
+
+
+def select_due_with_counts(conn, today=None):
+    """
+    select_due plus TMT-US-0030-011's skips: (due, {"notCompany": n, "backedOff": n}). Non-company listings
+    (is_company_equity) are never fetched; companies with no Yahoo data wait NO_DATA_BACKOFF_DAYS (backed_off).
+    """
     today = today or date.today()
     due = due_quarter_end(today)
     with conn.cursor() as cur:
@@ -283,7 +333,7 @@ def select_due(conn, today=None):
             ), latest AS (
                 SELECT isin_number, MAX(period_end) AS latest FROM stock_quarterly_result GROUP BY isin_number
             )
-            SELECT l.isin_number, l.symbol, l.exchange, l.security_code
+            SELECT l.isin_number, l.symbol, l.exchange, l.security_code, r.last_status, r.last_message, r.last_attempt_at
               FROM listing l
               LEFT JOIN latest q ON q.isin_number = l.isin_number
               LEFT JOIN stock_financials_refresh r ON r.isin_number = l.isin_number
@@ -291,27 +341,45 @@ def select_due(conn, today=None):
                AND (r.last_attempt_at IS NULL OR r.last_attempt_at::date < %s)
              ORDER BY l.isin_number
         """, (due, today))
-        return cur.fetchall()
+        rows = cur.fetchall()
+    selected, counts = [], {"notCompany": 0, "backedOff": 0}
+    for isin, symbol, exchange, security_code, status, message, attempted in rows:
+        if not is_company_equity(isin):
+            counts["notCompany"] += 1
+        elif backed_off(status, message, attempted, today):
+            counts["backedOff"] += 1
+        else:
+            selected.append((isin, symbol, exchange, security_code))
+    return selected, counts
 
 
 def refresh_due(get_conn, limit=None, delay_seconds=RATE_LIMIT_DELAY_SECONDS, sleep=time.sleep, today=None):
     """
     Refreshes every due company, one at a time (Yahoo rate-limits), each in its own transaction, so one failure or
     an interrupted run loses nothing -- whatever is still due is picked up next week or by Copy prompt.
-    get_conn() opens a DB connection. Returns {checked, refreshed, newQuarters, failed}.
+    get_conn() opens a DB connection. Returns {checked, refreshed, newQuarters, noData, failed, skippedNotCompany,
+    skippedBackedOff} (TMT-US-0030-011: noData = Yahoo has nothing, retried after NO_DATA_BACKOFF_DAYS; failed = network
+    / rate limit etc., retried next run).
     """
     conn = get_conn()
+    started = time.time()
     try:
-        due = select_due(conn, today)
+        due, skipped = select_due_with_counts(conn, today)
         if limit is not None:
             due = due[:limit]
-        summary = {"checked": len(due), "refreshed": 0, "newQuarters": 0, "failed": 0}
-        log.info("  Financial results: %d compan%s due for a refresh.", len(due), "y" if len(due) == 1 else "ies")
+        summary = {"checked": len(due), "refreshed": 0, "newQuarters": 0, "noData": 0, "failed": 0,
+                   "skippedNotCompany": skipped["notCompany"], "skippedBackedOff": skipped["backedOff"]}
+        log.info("  Financial results: %d compan%s due for a refresh (skipped: %d not a company -- funds / ETFs / "
+                 "rights / partly paid, %d with no Yahoo data in the last %d days).", len(due),
+                 "y" if len(due) == 1 else "ies", skipped["notCompany"], skipped["backedOff"], NO_DATA_BACKOFF_DAYS)
         for i, (isin, symbol, exchange, security_code) in enumerate(due, 1):
             r = refresh_one(conn, isin, symbol, exchange, security_code, trigger="ENRICHMENT")
             if r["refreshed"]:
                 summary["refreshed"] += 1
                 summary["newQuarters"] += r["newQuarters"]
+            elif r.get("status") == STATUS_NO_DATA:
+                summary["noData"] += 1
+                log.info("    [results no data] %s %s (%s) -- %s", isin, symbol, r["ticker"], r["error"])
             else:
                 summary["failed"] += 1
                 log.info("    [results failed] %s %s (%s) -- %s", isin, symbol, r["ticker"], r["error"])
@@ -319,7 +387,9 @@ def refresh_due(get_conn, limit=None, delay_seconds=RATE_LIMIT_DELAY_SECONDS, sl
                 log.info("    ... %d / %d companies done", i, len(due))
             sleep(delay_seconds)
         log.info("  Financial results: %(checked)d checked, %(refreshed)d refreshed, %(newQuarters)d new quarter(s), "
-                 "%(failed)d failed.", summary)
+                 "%(noData)d no data at Yahoo, %(failed)d failed; skipped %(skippedNotCompany)d not a company, "
+                 "%(skippedBackedOff)d backed off.", summary)
+        log.info("  Financial results took %.0f min.", (time.time() - started) / 60)
         return summary
     finally:
         conn.close()
