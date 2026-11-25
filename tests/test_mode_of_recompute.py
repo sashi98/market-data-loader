@@ -120,11 +120,12 @@ def test_rsi_walk_from_anchor_matches_full():
                        {"gain": 1e-9, "loss": 1e-9, "avg_gain": 1e-8, "avg_loss": 1e-8, "rsi14": 0.0101})
     assert r["rows_compared"] == len(days) - k - 1 and r["mismatches"] == 0, r
 
-    # anchor still pre-seed, or a 5+ session gap FULL would reseed at -> whole-history fallback (None)
+    # anchor still pre-seed -> whole-history fallback (None)
     pre = new.copy(); pre["anchor_avg_gain"] = None
     assert walk_from_anchor(pre, cal) is None
+    # TMT-MDL-BUG-0016: a 5+ session gap no longer reseeds (TradingView rule) -> the walk simply continues
     gap = new.copy(); gap["anchor_date"] = full.at[k - 6, "trade_date"]
-    assert walk_from_anchor(gap, cal) is None
+    assert walk_from_anchor(gap, cal) is not None
     # averages decayed below the stored decimals (stock flat for months) -> fallback, not RSI NULL
     flat = new.copy(); flat["anchor_avg_gain"] = 0.0; flat["anchor_avg_loss"] = 0.0
     assert walk_from_anchor(flat, cal) is None
