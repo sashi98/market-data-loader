@@ -40,6 +40,7 @@ from core.date_format import fmt_date
 from core.recompute import mode as recompute_mode
 from core.recompute import queue as recompute_queue
 from core.recompute import shadow
+from core.recompute import spot_check
 from core.rsi.rsi_calculator import compute_rsi14_all
 from core.rsi.rsi_continuity import fetch_trading_calendar, build_calendar_index, is_gap
 from core.rsi.rsi_math import step, compute_rsi14
@@ -301,7 +302,8 @@ def compute_incremental(conn, cfg, exchange, since, list_b, calendar_index):
     return result, list_a_count, fallback_count
 
 
-def _compare(conn, cfg, exchange, candidate, cycle_trade_date, list_a_count, list_b_count):
+def _fetch_stored_rows(conn, cfg, exchange, candidate):
+    """What the workbook holds for candidate's (security_id, trade_date) keys."""
     sma_select = f", w.{SMA_COLUMN}" if cfg.get("sma_window") else ""
     actual = pd.DataFrame()
     if not candidate.empty:
@@ -314,10 +316,37 @@ def _compare(conn, cfg, exchange, candidate, cycle_trade_date, list_a_count, lis
              WHERE w.exchange = %(exchange)s
             """, conn, params={"exchange": exchange, "sids": candidate["security_id"].astype(str).tolist(),
                                "dates": candidate["trade_date"].tolist()})
+    return actual
+
+
+def _value_columns_and_tolerances(cfg):
     value_columns = SHADOW_VALUE_COLUMNS + ([SMA_COLUMN] if cfg.get("sma_window") else [])
-    tolerances = {**SHADOW_TOLERANCES, SMA_COLUMN: SMA_TOLERANCE}
+    return value_columns, {**SHADOW_TOLERANCES, SMA_COLUMN: SMA_TOLERANCE}
+
+
+def _compare(conn, cfg, exchange, candidate, cycle_trade_date, list_a_count, list_b_count):
+    actual = _fetch_stored_rows(conn, cfg, exchange, candidate)
+    value_columns, tolerances = _value_columns_and_tolerances(cfg)
     result = shadow.compare(candidate, actual, ["security_id", "trade_date"], value_columns, tolerances)
     print(f"  {shadow.record(conn, cycle_trade_date, cfg['target'], exchange, result, list_a_count, list_b_count)}")
+
+
+def _spot_check(conn, cfg, exchange, cycle_trade_date, list_b, calendar_index):
+    """TMT-MDL-US-0005-005: today's slot of stocks recomputed over their whole history and compared with the workbook."""
+    sids = _exchange_security_ids(conn, cfg, exchange)
+    sample = spot_check.select_sample(sids, cycle_trade_date, exclude=list_b)
+
+    def recompute(sample_sids):
+        df = _fetch_full_history(conn, cfg, exchange, sample_sids)
+        if df.empty:
+            return df
+        full = compute_rsi14_all(df, calendar_index=calendar_index)
+        return add_rsi_sma(full, cfg["sma_window"]) if cfg.get("sma_window") else full
+
+    value_columns, tolerances = _value_columns_and_tolerances(cfg)
+    spot_check.check(conn, cycle_trade_date, cfg["target"], exchange, cfg["target"], sample, len(sids), recompute,
+                     lambda truth: _fetch_stored_rows(conn, cfg, exchange, truth),
+                     ["security_id", "trade_date"], value_columns, tolerances)
 
 
 def run(conn, cfg, indicator_id, start_date, end_date, mode_of_recompute):
@@ -361,6 +390,7 @@ def run(conn, cfg, indicator_id, start_date, end_date, mode_of_recompute):
             total_written += written
             print(f"  [{indicator_id}/{exchange}] INCREMENTAL from {fmt_date(since)} -- list-A {list_a_count:,} | "
                   f"list-B {len(list_b):,} | {A_FALLBACK} {fallback_count:,} -- {written:,} rows written.")
+            _spot_check(conn, cfg, exchange, end_date, list_b, calendar_index)
 
         if mode == recompute_mode.SHADOW and not whole_exchange:
             _compare(conn, cfg, exchange, candidate, end_date, list_a_count, len(list_b))

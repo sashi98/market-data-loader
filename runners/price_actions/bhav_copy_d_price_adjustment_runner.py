@@ -75,6 +75,7 @@ from core.price_series import classification
 from core.recompute import mode as recompute_mode
 from core.recompute import queue as recompute_queue
 from core.recompute import shadow
+from core.recompute import spot_check
 import pandas as pd
 
 
@@ -285,6 +286,34 @@ def _shadow_compare(conn, exchange, candidate, cycle_trade_date, list_a, list_b)
     print(f"  {line}")
 
 
+def _spot_check(conn, exchange, cycle_trade_date, list_a, isins_by_security, actions_df, lineage_map):
+    """
+    TMT-MDL-US-0005-005: today's slot of list-A stocks rebuilt over their whole history (in memory, exactly like
+    FULL) and compared with bhav_copy_adjusted. A mismatch queues the stock as PRICE_ADJUSTMENT / SPOT_CHECK, so
+    next cycle STEP 4 rebuilds it as list-B and passes it on to the rollups and RSI.
+    """
+    sample = spot_check.select_sample(list_a.keys(), cycle_trade_date)
+
+    def recompute(sample_sids):
+        isins = [isin for sid in sample_sids for isin in isins_by_security.get(sid, [])]
+        raw = fetch_raw_bhav_copy(conn, exchange, isins)
+        if raw.empty:
+            return pd.DataFrame()
+        built = build_adjusted_series(raw, actions_df, lineage_map)
+        if not built.empty:
+            built["exchange"] = exchange
+        return built
+
+    def stored(truth):
+        return pd.read_sql(ACTUAL_ROWS_SQL, conn, params={
+            "exchange": exchange, "sids": truth["security_id"].astype(str).tolist(),
+            "dates": truth["trade_date"].tolist()})
+
+    spot_check.check(conn, cycle_trade_date, recompute_mode.PRICE_ADJUSTMENT, exchange,
+                     recompute_queue.TARGET_PRICE_ADJUSTMENT, sample, len(list_a), recompute, stored,
+                     ["security_id", "trade_date"], SHADOW_VALUE_COLUMNS, SHADOW_TOLERANCES)
+
+
 def run(env_values, exchange, start_date, end_date, mode_of_recompute=recompute_mode.FULL):
     """
     STEP 4 -- Price Adjustment Runner, for ONE exchange, in the given mode_of_recompute (see this module's
@@ -376,6 +405,9 @@ def run(env_values, exchange, start_date, end_date, mode_of_recompute=recompute_
                 raise PriceAdjustmentError(f"Could not queue list-B stocks for the rollups: {e}")
             if queued_n:
                 print(f"  [OK] Queued {len(downstream):,} stock(s) for a full rebuild in the weekly / monthly rollups and rsi14d (rsi14w / rsi14m via the rollups).")
+
+            if mode == recompute_mode.INCREMENTAL and previous_ok and list_a:
+                _spot_check(conn, exchange, end_date, list_a, isins_by_security, actions_df, lineage_map)
 
             processing_time_ms = int((time.time() - run_started_at) * 1000)
             try:

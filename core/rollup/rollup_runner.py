@@ -79,6 +79,7 @@ from core.db_client import get_connection, DbConnectionError
 from core.recompute import mode as recompute_mode
 from core.recompute import queue as recompute_queue
 from core.recompute import shadow
+from core.recompute import spot_check
 from core.rollup.period import period_start, next_period_start
 from core.rollup.rollup_calculator import compute_rollup, _percent_change
 from core.rollup.rollup_persistence import (
@@ -259,6 +260,29 @@ def _shadow_compare(conn, config, exchange, candidate, end_date, list_a_count, l
     print(f"  {shadow.record(conn, end_date, target, exchange, result, list_a_count, list_b_count)}")
 
 
+def _rollup_security_ids(conn, rollup_table, exchange):
+    with conn.cursor() as cur:
+        cur.execute(f"SELECT DISTINCT security_id FROM {rollup_table} WHERE exchange = %s", (exchange,))
+        return [r[0] for r in cur.fetchall()]
+
+
+def _spot_check(conn, config, exchange, start_date, end_date, list_b):
+    """TMT-MDL-US-0005-005: today's slot of stocks rolled up again over their whole history and compared."""
+    try:
+        sids = _rollup_security_ids(conn, config["rollup_table"], exchange)
+    except Exception as e:  # noqa: BLE001 -- never break the cycle
+        conn.rollback()
+        print(f"  [WARN] SPOT CHECK {config['target']}/{exchange}: could not list the stocks ({e}) -- skipped.")
+        return
+    sample = spot_check.select_sample(sids, end_date, exclude=list_b)
+    spot_check.check(
+        conn, end_date, config["target"], exchange, config["target"], sample, len(sids),
+        lambda s: _rebuild_securities(conn, config, exchange, s, start_date, end_date, write=False),
+        lambda truth: fetch_rollup_rows_by_keys(conn, config["rollup_table"], exchange,
+                                                truth["security_id"].tolist(), truth["trade_date"].tolist()),
+        ["security_id", "trade_date"], SHADOW_VALUE_COLUMNS, SHADOW_TOLERANCES)
+
+
 def _run_for_one_exchange(env_values, config, exchange, start_date, end_date, mode):
     label = config["label"]
     target = config["target"]
@@ -318,6 +342,8 @@ def _run_for_one_exchange(env_values, config, exchange, start_date, end_date, mo
                 except RollupPersistenceError as e:
                     print(f"    [{label}/{exchange}] FAILED rebuilding list-B: {e}")
                     ok = False
+            if ok:
+                _spot_check(conn, config, exchange, start_date, end_date, list_b)
 
         if not ok:
             return False
