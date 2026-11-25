@@ -57,7 +57,14 @@ RSI_PERIOD_IMPORT_NOTE = None  # see core.rsi.rsi_math.RSI_PERIOD -- not re-impo
 # not calibrated against real data yet, deliberately conservative to
 # start (a short absence is more likely a data hiccup than a real
 # halt -- don't reseed too eagerly).
-GAP_THRESHOLD_SESSIONS = 5
+#
+# TMT-MDL-BUG-0016 (25-Nov-2026): DISABLED (None). A thinly traded stock (INDIFRA, NSE SME) trades only every few
+# sessions, so 5+ missed sessions between trades is its normal rhythm, not a suspension. Every such gap restarted the
+# Wilder average, and a restart needs 14 trades in a row without another gap -- so most of its days had no RSI and
+# RSI-SMA was never filled. TradingView (the reference TMT's RSI is checked against) and TMT's own weekly / monthly RSI
+# never reseed: RSI 14 runs over the stock's own traded bars, gaps included. The daily RSI now does the same.
+# Set a number of sessions here to bring the reseed back (FULL and INCREMENTAL both follow it via is_gap).
+GAP_THRESHOLD_SESSIONS = None
 
 # Excludes only true zero/null-traded-quantity rows -- a safety net,
 # not a general liquidity cutoff. See module docstring.
@@ -152,7 +159,9 @@ def sessions_between(calendar_index, earlier_date, later_date):
 
 
 def is_gap(calendar_index, earlier_date, later_date, threshold=GAP_THRESHOLD_SESSIONS):
-    """True if the stock missed at least `threshold` real trading sessions between the two dates."""
+    """True if the stock missed at least `threshold` real trading sessions between the two dates (never when None)."""
+    if threshold is None:
+        return False
     missed = sessions_between(calendar_index, earlier_date, later_date)
     if missed is None:
         return False
