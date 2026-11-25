@@ -83,6 +83,31 @@ def test_yf_ticker():
 
 # ── DB (throw-away Postgres) ─────────────────────────────────────────────────
 
+def test_is_company_equity_skips_funds_rights_and_partly_paid():
+    # TMT-US-0030-011
+    assert qr.is_company_equity("INE00M201021") and qr.is_company_equity("INE0PS301014") and qr.is_company_equity("INE002A01018")
+    assert not qr.is_company_equity("INF846K01K35"), "mutual fund / ETF"
+    assert not qr.is_company_equity("INE754C20028"), "CRESCE-RE1 rights entitlement"
+    assert not qr.is_company_equity("IN9155A01020"), "partly paid / DVR line"
+    assert not qr.is_company_equity(None) and not qr.is_company_equity("INE00M2010")
+
+
+def test_no_data_backs_off_30_days_unless_a_new_quarter_becomes_due():
+    no_data = (qr.STATUS_NO_DATA, "yfinance 531552.BO: no quarterly statements returned")
+    old_failed = (qr.STATUS_FAILED, "yfinance 531552.BO: no quarterly statements returned")   # saved before -011
+    network = (qr.STATUS_FAILED, "HTTPSConnectionPool: Read timed out")
+    tried = datetime(2026, 11, 23, 2, 0)
+    for status, message in (no_data, old_failed):
+        assert qr.backed_off(status, message, tried, date(2026, 11, 30)), "1 week later: still waiting"
+        assert qr.backed_off(status, message, tried, date(2026, 12, 13)), "3 weeks later: still waiting"
+        assert not qr.backed_off(status, message, tried, date(2026, 12, 24)), "30 days later: asked again"
+    # Q3 FY27 (Dec-26) becomes due on 14-Jan-2027: a no-data company tried on 10-Jan is asked again on 15-Jan
+    assert not qr.backed_off(qr.STATUS_NO_DATA, "x", datetime(2027, 1, 10), date(2027, 1, 15))
+    assert not qr.backed_off(*network, tried, date(2026, 11, 30)), "network failures retry next run"
+    assert not qr.backed_off(qr.STATUS_NO_DATA, "x", None, date(2026, 11, 30))
+    assert qr.is_no_data(qr.STATUS_FAILED, "no yfinance ticker for this listing")
+
+
 DSN = os.environ.get("TMT_TEST_PG_DSN")
 pytestmark_db = pytest.mark.skipif(not DSN, reason="set TMT_TEST_PG_DSN to run the DB tests")
 
@@ -138,7 +163,7 @@ def test_save_inserts_then_never_overwrites_with_null(conn):
 def test_refresh_one_records_success_and_failure(conn, monkeypatch):
     monkeypatch.setattr(qr, "fetch_from_yfinance", lambda t: (qr.rows_from_frame(_income_frame(), qr._INCOME_FIELDS), []))
     r = qr.refresh_one(conn, "INE00M201021", "SWSOLAR", "NSE", None, trigger="COPY_PROMPT")
-    assert r == {"refreshed": True, "newQuarters": 5, "ticker": "SWSOLAR.NS", "error": None}
+    assert r == {"refreshed": True, "newQuarters": 5, "ticker": "SWSOLAR.NS", "error": None, "status": "OK"}
 
     def boom(t):
         raise qr.FinancialsError("Yahoo down")
@@ -176,8 +201,24 @@ def test_refresh_due_one_failure_does_not_stop_the_rest(conn, monkeypatch):
     monkeypatch.setattr(qr, "fetch_from_yfinance", fetch)
     sleeps = []
     summary = qr.refresh_due(lambda: psycopg2.connect(DSN), sleep=sleeps.append, today=date(2026, 11, 22))
-    assert summary == {"checked": 3, "refreshed": 2, "newQuarters": 10, "failed": 1}
+    assert summary == {"checked": 3, "refreshed": 2, "newQuarters": 10, "noData": 0, "failed": 1,
+                       "skippedNotCompany": 0, "skippedBackedOff": 0}
     assert len(sleeps) == 3, "throttled after every company"
+
+
+@pytestmark_db
+def test_no_data_company_is_backed_off_and_non_company_never_selected(conn, monkeypatch):
+    # TMT-US-0030-011
+    with conn.cursor() as cur:
+        cur.execute("INSERT INTO stock_universe VALUES ('INF846K01K35','BNKETF','NSE',NULL), ('INE754C20028','CRESCE-RE1','BSE','800001')")
+    conn.commit()
+    monkeypatch.setattr(qr, "fetch_from_yfinance", lambda t: ([], []))
+    r = qr.refresh_one(conn, "INE999Z01011", "BSEONLY", "BSE", "500001", trigger="ENRICHMENT")
+    assert r["status"] == "NO_DATA"
+    qr.record_attempt(conn, "INE999Z01011", "NO_DATA", r["error"], "ENRICHMENT", now=datetime(2026, 11, 25, 9, 0))
+    conn.commit()
+    due, counts = qr.select_due_with_counts(conn, date(2026, 11, 30))
+    assert "INE999Z01011" not in [d[0] for d in due] and counts == {"notCompany": 2, "backedOff": 1}
 
 
 @pytestmark_db
