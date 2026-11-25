@@ -16,16 +16,19 @@ MAX_EXAMPLES = 10
 LOGGED_EXAMPLES = 3
 
 
-def compare(candidate_df, actual_df, key_columns, value_columns, tolerances=None):
+def compare(candidate_df, actual_df, key_columns, value_columns, tolerances=None, labels=("incremental", "full")):
     """
     candidate_df: INCREMENTAL result. actual_df: what FULL wrote, for the same keys (may contain more keys;
     only the candidate's keys are compared). A candidate key missing from actual counts as a mismatch.
 
-    Returns {"rows_compared", "mismatches", "max_abs_diff", "examples": [..]}.
+    Returns {"rows_compared", "mismatches", "max_abs_diff", "examples": [..], "mismatched_security_ids": set}
+    (mismatched_security_ids: every stock with at least one mismatching row, when "security_id" is a key).
+    labels: how the two sides are named in the examples -- the spot check passes ("recomputed", "stored").
     """
     tolerances = tolerances or {}
     if candidate_df is None or candidate_df.empty:
-        return {"rows_compared": 0, "mismatches": 0, "max_abs_diff": 0.0, "examples": []}
+        return {"rows_compared": 0, "mismatches": 0, "max_abs_diff": 0.0, "examples": [],
+                "mismatched_security_ids": set()}
 
     cand = candidate_df[key_columns + value_columns].copy()
     act = actual_df[key_columns + value_columns].copy() if actual_df is not None and not actual_df.empty \
@@ -41,12 +44,15 @@ def compare(candidate_df, actual_df, key_columns, value_columns, tolerances=None
     mismatches = 0
     max_abs_diff = 0.0
     examples = []
+    mismatched_sids = set()
     for _, row in merged.iterrows():
         key = {k: str(row[k]) for k in key_columns}
         if row["_merge"] != "both":
             mismatches += 1
+            if "security_id" in key:
+                mismatched_sids.add(key["security_id"])
             if len(examples) < MAX_EXAMPLES:
-                examples.append({**key, "problem": "row missing in FULL result"})
+                examples.append({**key, "problem": f"row missing in the {labels[1]} result"})
             continue
         bad = []
         for col in value_columns:
@@ -56,26 +62,35 @@ def compare(candidate_df, actual_df, key_columns, value_columns, tolerances=None
             if a_na and b_na:
                 continue
             if a_na != b_na:
-                bad.append({"column": col, "incremental": None if a_na else float(a), "full": None if b_na else float(b)})
+                bad.append({"column": col, labels[0]: None if a_na else float(a), labels[1]: None if b_na else float(b)})
                 continue
             diff = abs(float(a) - float(b))
             max_abs_diff = max(max_abs_diff, diff)
             if diff > tolerances.get(col, DEFAULT_TOLERANCE):
-                bad.append({"column": col, "incremental": float(a), "full": float(b), "diff": diff})
+                bad.append({"column": col, labels[0]: float(a), labels[1]: float(b), "diff": diff})
         if bad:
             mismatches += 1
+            if "security_id" in key:
+                mismatched_sids.add(key["security_id"])
             if len(examples) < MAX_EXAMPLES:
                 examples.append({**key, "columns": bad})
-    return {"rows_compared": len(merged), "mismatches": mismatches, "max_abs_diff": max_abs_diff, "examples": examples}
+    return {"rows_compared": len(merged), "mismatches": mismatches, "max_abs_diff": max_abs_diff, "examples": examples,
+            "mismatched_security_ids": mismatched_sids}
 
 
 def verdict_of(result):
     return "PASS" if result["mismatches"] == 0 else "FAIL"
 
 
-def record(conn, cycle_trade_date, target, exchange, result, list_a_count=None, list_b_count=None):
-    """Writes one recompute_shadow_check row (commits) and returns the verdict log line."""
+def record(conn, cycle_trade_date, target, exchange, result, list_a_count=None, list_b_count=None,
+           kind="SHADOW", detail=""):
+    """
+    Writes one recompute_shadow_check row (commits) and returns the verdict log line.
+    kind="SPOT CHECK" (TMT-MDL-US-0005-005): the row's target is stored as "SPOT:<target>" so spot checks and
+    SHADOW runs can be told apart; list_a_count = stocks checked, list_b_count = stocks that failed.
+    """
     verdict = verdict_of(result)
+    stored_target = target if kind == "SHADOW" else f"SPOT:{target}"
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -85,15 +100,15 @@ def record(conn, cycle_trade_date, target, exchange, result, list_a_count=None, 
                      rows_compared, mismatches, max_abs_diff, verdict, examples)
                 VALUES (CURRENT_TIMESTAMP, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (cycle_trade_date, target, exchange, list_a_count, list_b_count, result["rows_compared"],
+                (cycle_trade_date, stored_target, exchange, list_a_count, list_b_count, result["rows_compared"],
                  result["mismatches"], result["max_abs_diff"], verdict,
                  json.dumps(result["examples"], default=str) if result["examples"] else None),
             )
         conn.commit()
     except Exception as e:
         conn.rollback()
-        print(f"  [WARN] SHADOW {target}/{exchange}: could not record recompute_shadow_check row: {e}")
-    line = (f"SHADOW {target} [{exchange}]: {result['rows_compared']} rows compared, "
+        print(f"  [WARN] {kind} {target}/{exchange}: could not record recompute_shadow_check row: {e}")
+    line = (f"{kind} {target} [{exchange}]: {detail}{result['rows_compared']} rows compared, "
             f"{result['mismatches']} mismatches, max diff {result['max_abs_diff']:.6f} -- {verdict}")
     # First few mismatches in the log too, so a FAIL can be read without querying recompute_shadow_check.
     for example in result["examples"][:LOGGED_EXAMPLES]:
