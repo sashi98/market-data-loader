@@ -61,3 +61,21 @@ def browser_get(url, headers=None, params=None, timeout=(10, 60), _curl=None):
         return curl.get(url, headers=clean, params=params, timeout=total, impersonate=IMPERSONATE)
     except Exception as e:  # noqa: BLE001 -- curl_cffi's own error classes vary by version
         raise requests.exceptions.ConnectionError(f"{type(e).__name__}: {e}") from e
+
+def browser_post(url, headers=None, data=None, json=None, timeout=(10, 60), _curl=None):
+    """
+    POST with the same browser identity as browser_get (curl_cffi impersonating Chrome when installed, else requests).
+    data= URL-encoded form fields (dict), json= a JSON body. Network failures are raised as
+    requests.exceptions.RequestException. Added for fund-house portfolio listings (TMT-MDL-US-0008).
+    """
+    import requests
+    curl = _curl if _curl is not None else _curl_cffi()
+    if curl is None:
+        return requests.post(url, headers={**(headers or {}), "User-Agent": BROWSER_USER_AGENT}, data=data, json=json,
+                             timeout=timeout)
+    clean = {k: v for k, v in (headers or {}).items() if k.lower() != "user-agent"}
+    total = sum(timeout) if isinstance(timeout, (tuple, list)) else timeout
+    try:
+        return curl.post(url, headers=clean, data=data, json=json, timeout=total, impersonate=IMPERSONATE)
+    except Exception as e:  # noqa: BLE001 -- curl_cffi's own error classes vary by version
+        raise requests.exceptions.ConnectionError(f"{type(e).__name__}: {e}") from e
