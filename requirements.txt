@@ -6,3 +6,5 @@ tradingview-screener
 nse==3.1.2
 bse==3.3.3
 curl_cffi
+openpyxl
+xlrd
